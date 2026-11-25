@@ -3811,6 +3811,7 @@ fn choosing_a_sandbox_stores_the_kind_notes_the_workspace_and_rebuilds() {
         skills: Vec::new(),
         instance_lock: None,
         managed: None,
+        shared: None,
     });
     h.app.sandbox_offered = offered(true, true, false, false, false);
     let effects = h.app.choose_sandbox(SandboxChoice::Local);
@@ -3860,6 +3861,7 @@ fn choosing_a_non_local_sandbox_assembles_through_an_effect() {
         skills: Vec::new(),
         instance_lock: None,
         managed: None,
+        shared: None,
     };
     let effects = h.app.on_event(crate::events::UiEvent::SandboxAssembled {
         choice: SandboxChoice::Docker,
@@ -4013,6 +4015,7 @@ fn a_profile_switch_moves_bash_to_the_new_profiles_sandbox() {
         skills: Vec::new(),
         instance_lock: None,
         managed: None,
+        shared: None,
     });
     // work (moving in) stores nothing: its own sandbox is local.
     let effects = h.app.switch_profile("work");
@@ -4080,6 +4083,7 @@ fn a_switch_keeps_a_sandbox_the_new_profile_resolves_to() {
         skills: Vec::new(),
         instance_lock: None,
         managed: None,
+        shared: None,
     });
     // work resolves to the same kind AND the same target: the
     // running assembly is already the profile's own sandbox.
@@ -4142,6 +4146,7 @@ fn the_sandbox_badge_names_the_kind_or_the_instance() {
         skills: Vec::new(),
         instance_lock: None,
         managed: None,
+        shared: None,
     });
     // No instance stored: the badge is the kind.
     assert_eq!(h.app.sandbox_badge(), "docker");

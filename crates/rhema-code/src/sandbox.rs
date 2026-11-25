@@ -29,6 +29,7 @@ use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_host_agent::HostAgentConfig;
 use rhema_prompt::Skill;
+use rhema_sandbox::kit::SharedRoot;
 use rhema_sandbox::{FsRoot, InstanceLock, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
 use rhema_sandbox_ecrou::{DEFAULT_IMAGE, EcrouSandbox};
@@ -99,6 +100,10 @@ pub struct Sandboxed {
     /// The instance stop-on-exit may stop: a rhema-derived name only,
     /// a stored target names an instance the user owns, never stopped.
     pub(crate) managed: Option<ManagedInstance>,
+    /// The runtime root the backend mounts at the same path, when it
+    /// has one: the install, the MCP socket, and the session tree
+    /// live under it, and the sandbox sees the host path itself.
+    pub(crate) shared: Option<SharedRoot>,
 }
 
 /// The backend of a managed instance, the stop argv's program.
@@ -113,6 +118,93 @@ pub(crate) enum ManagedKind {
 pub(crate) struct ManagedInstance {
     kind: ManagedKind,
     name: String,
+}
+
+/// The per-user runtime root a sharing backend mounts at the same
+/// path: `RHEMA_RUNTIME_DIR`, then `$XDG_RUNTIME_DIR/rhema`, then
+/// `$TMPDIR/rhema-<user>`, then `$HOME/.cache/rhema/runtime`. The
+/// directory is created `0700` when missing.
+fn runtime_root() -> std::io::Result<PathBuf> {
+    let candidate = if let Some(dir) = std::env::var_os("RHEMA_RUNTIME_DIR") {
+        PathBuf::from(dir)
+    } else if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir).join("rhema")
+    } else if let Some(tmp) = std::env::var_os("TMPDIR") {
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
+        let user: String = user
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        PathBuf::from(tmp).join(format!("rhema-{user}"))
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".cache/rhema/runtime")
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no RHEMA_RUNTIME_DIR, XDG_RUNTIME_DIR, TMPDIR, or HOME",
+        ));
+    };
+    std::fs::create_dir_all(&candidate)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(candidate)
+}
+
+/// The root, or a notice when the host offers none: the kits that need
+/// it close instead of failing the session.
+fn mounted_runtime() -> Option<PathBuf> {
+    match runtime_root() {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!("warning: no shared runtime root, the sandbox kits stay off: {err}");
+            None
+        }
+    }
+}
+
+/// Runs the sandbox's installer into the shared root, once per kit
+/// version. The host fetches the published script and checks its
+/// sidecar; the sandbox runs it, so the helper matches the sandbox's
+/// OS and architecture. A helper that already answers this host's
+/// kit version is left alone.
+async fn install_helper(sandbox: &dyn Sandbox, shared: &SharedRoot) -> anyhow::Result<()> {
+    if rhema_sandbox::kit::verify(sandbox, shared).await.is_ok() {
+        return Ok(());
+    }
+    let url = format!("{}/code", crate::update::dist_base());
+    let script = tokio::task::spawn_blocking(move || crate::update::fetch_verified_script(&url))
+        .await
+        .map_err(|err| anyhow::anyhow!("the installer fetch task failed: {err}"))?
+        .map_err(|err| anyhow::anyhow!("the installer fetch failed: {err}"))?;
+    let bin = shared.host.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let path = bin.join("install.sh");
+    std::fs::write(&path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let script_path = path.to_string_lossy().replace('\'', "'\\''");
+    let base = std::env::var("RHEMA_DIST_BASE")
+        .ok()
+        .map(|base| format!("RHEMA_DIST_BASE='{}' ", base.replace('\'', "'\\''")))
+        .unwrap_or_default();
+    let installer = rhema_sandbox::kit::Installer::new(format!(
+        "{base}RHEMA_INSTALL_DIR={{dir}} sh '{script_path}'"
+    ));
+    rhema_sandbox::kit::install(sandbox, shared, &installer)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Builds the tool set a non-local choice runs the agent on: the
@@ -137,6 +229,10 @@ pub async fn assemble(
     // `Sandboxed` for the session and the exit to use.
     let mut instance_lock = None;
     let mut managed = None;
+    // The runtime root a sharing backend mounts at the same path;
+    // `None` for the postures without a mount, whose kits fall back to
+    // the sandbox's own tree.
+    let mut shared = None;
     // Whether the skills ride the mounts; the seeded postures copy them
     // into the workspace instead.
     let mut mounted_skills = false;
@@ -157,13 +253,16 @@ pub async fn assemble(
             let agents = agents_skills_dir();
             let lock = InstanceLock::acquire("docker", &container)
                 .map_err(|err| anyhow::anyhow!("the docker sandbox lock: {err}"))?;
+            let runtime = mounted_runtime();
             ensure_container(
                 &container,
                 &host_workspace,
+                runtime.as_deref(),
                 skills.as_deref(),
                 agents.as_deref(),
             )
             .await?;
+            shared = runtime.map(SharedRoot::new);
             instance_lock = Some(lock);
             managed = stored.is_none().then(|| ManagedInstance {
                 kind: ManagedKind::Docker,
@@ -217,13 +316,16 @@ pub async fn assemble(
                 // path is the host path itself and FsRoot's file
                 // routes are plain fs on the host side.
                 ensure_lxd_instance(&instance, false, uid, gid).await?;
+                let runtime = mounted_runtime();
                 ensure_lxd_mount(
                     &instance,
                     &host_workspace,
+                    runtime.as_deref(),
                     skills.as_deref(),
                     agents.as_deref(),
                 )
                 .await?;
+                shared = runtime.map(SharedRoot::new);
                 let root = FsRoot::new(workspace.to_path_buf())
                     .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
                 Arc::new(
@@ -318,6 +420,18 @@ pub async fn assemble(
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
     ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await?;
+    // A mounted backend now has its helper: the sandbox's own
+    // installer fetches the release for the sandbox's target, and the
+    // shared root carries it. An install that fails closes the kits
+    // instead of failing the session; the notice names why.
+    if let Some(root) = shared.clone()
+        && let Err(err) = install_helper(&*sandbox, &root).await
+    {
+        eprintln!(
+            "warning: the sandbox kit helper did not install, the shell kits stay off: {err}"
+        );
+        shared = None;
+    }
     // The assembly is done, devices, provision, and seed all landed
     // under the exclusive hold. Downgrade to the session's shared
     // posture; the lock rides `Sandboxed` out to the exit path.
@@ -337,10 +451,17 @@ pub async fn assemble(
         skills,
         instance_lock,
         managed,
+        shared,
     })
 }
 
 impl Sandboxed {
+    /// The runtime root the sandbox shares with this host, when the
+    /// backend mounts one.
+    pub(crate) fn shared(&self) -> Option<&SharedRoot> {
+        self.shared.as_ref()
+    }
+
     /// Puts the assembled tool set and the seeded skill list on a
     /// host-agent config. Runs BEFORE the subagent wire: their inner
     /// shell inherits the executor installed here

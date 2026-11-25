@@ -2390,6 +2390,7 @@ mod scroll_tests {
             skills: Vec::new(),
             instance_lock: None,
             managed: None,
+            shared: None,
         });
         app.config.set_for_profile(Some("personal"), |profile| {
             profile.sandbox = Some(rhema_config::SandboxSettings {

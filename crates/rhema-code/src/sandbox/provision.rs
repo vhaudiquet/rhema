@@ -87,15 +87,23 @@ pub(crate) fn docker_provision_argv(name: &str) -> Vec<String> {
 pub(crate) async fn ensure_container(
     name: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let name = name.to_owned();
     let workspace = workspace.to_owned();
+    let runtime = runtime.map(std::path::PathBuf::from);
     let skills = skills.map(std::path::PathBuf::from);
     let agents = agents.map(std::path::PathBuf::from);
     tokio::task::spawn_blocking(move || {
-        ensure_container_blocking(&name, &workspace, skills.as_deref(), agents.as_deref())
+        ensure_container_blocking(
+            &name,
+            &workspace,
+            runtime.as_deref(),
+            skills.as_deref(),
+            agents.as_deref(),
+        )
     })
     .await
     .map_err(|err| anyhow::anyhow!("the docker ensure task failed: {err}"))?
@@ -104,11 +112,12 @@ pub(crate) async fn ensure_container(
 fn ensure_container_blocking(
     name: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     if let Some(mounts) = docker_mounts(name)? {
-        if mounts_current(&mounts, workspace, skills, agents) {
+        if mounts_current(&mounts, workspace, runtime, skills, agents) {
             // Present, mounts whole: started when it is not.
             if !container_running(name)? {
                 let output = std::process::Command::new("docker")
@@ -142,7 +151,7 @@ fn ensure_container_blocking(
             );
         }
     }
-    let argv = docker_run_argv(name, workspace, skills, agents);
+    let argv = docker_run_argv(name, workspace, runtime, skills, agents);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let output = std::process::Command::new("docker")
         .args(&refs)
@@ -183,10 +192,16 @@ pub(crate) fn docker_mounts(name: &str) -> anyhow::Result<Option<String>> {
 pub(crate) fn mounts_current(
     mounts_json: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> bool {
     if !mounts_json.contains(&source_entry(workspace)) {
+        return false;
+    }
+    if let Some(runtime) = runtime
+        && !mounts_json.contains(&source_entry(&runtime.to_string_lossy()))
+    {
         return false;
     }
     [skills, agents]
@@ -209,6 +224,7 @@ pub(crate) fn source_entry(path: &str) -> String {
 pub(crate) fn docker_run_argv(
     name: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> Vec<String> {
@@ -220,6 +236,10 @@ pub(crate) fn docker_run_argv(
         "-v".to_owned(),
         bind_mount(workspace, false),
     ];
+    if let Some(runtime) = runtime {
+        argv.push("-v".to_owned());
+        argv.push(bind_mount(&runtime.to_string_lossy(), false));
+    }
     for dir in [skills, agents].into_iter().flatten() {
         argv.push("-v".to_owned());
         argv.push(bind_mount(&dir.to_string_lossy(), true));
@@ -441,15 +461,23 @@ pub(crate) fn idmap_of(name: &str) -> anyhow::Result<String> {
 pub(crate) async fn ensure_lxd_mount(
     name: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let name = name.to_owned();
     let workspace = workspace.to_owned();
+    let runtime = runtime.map(std::path::PathBuf::from);
     let skills = skills.map(std::path::PathBuf::from);
     let agents = agents.map(std::path::PathBuf::from);
     tokio::task::spawn_blocking(move || {
-        ensure_lxd_mount_blocking(&name, &workspace, skills.as_deref(), agents.as_deref())
+        ensure_lxd_mount_blocking(
+            &name,
+            &workspace,
+            runtime.as_deref(),
+            skills.as_deref(),
+            agents.as_deref(),
+        )
     })
     .await
     .map_err(|err| anyhow::anyhow!("the lxd mount task failed: {err}"))?
@@ -458,11 +486,17 @@ pub(crate) async fn ensure_lxd_mount(
 fn ensure_lxd_mount_blocking(
     name: &str,
     workspace: &str,
+    runtime: Option<&std::path::Path>,
     skills: Option<&std::path::Path>,
     agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let devices = lxd_devices(name)?;
     lxd_device(name, &devices, "workspace", workspace, false)?;
+    if let Some(runtime) = runtime {
+        // Re-shown: the workspace add changed the set.
+        let devices = lxd_devices(name)?;
+        lxd_device(name, &devices, "runtime", &runtime.to_string_lossy(), false)?;
+    }
     let binds = [("skills", skills), ("agents", agents)];
     for (device, dir) in binds
         .into_iter()

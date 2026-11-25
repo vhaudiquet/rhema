@@ -1173,10 +1173,24 @@ pub(crate) fn session_agent_config(
             Needs::MCP,
         ));
     }
-    if !kits.is_empty()
-        && let Some(placed) = kits_registry.place(&kits, inherited.as_deref())
-    {
-        config.shell_env = placed.env.clone();
+    let placed_env = if kits.is_empty() {
+        None
+    } else if let Some(shared) = sandboxed.and_then(|s| s.shared()) {
+        let key = crate::mcp_wire::runtime_session_key(session_key);
+        match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
+            Ok(env) => Some(env),
+            Err(err) => {
+                eprintln!("warning: the sandbox kit placement failed: {err}");
+                None
+            }
+        }
+    } else {
+        kits_registry
+            .place(&kits, inherited.as_deref())
+            .map(|placed| placed.env.clone())
+    };
+    if let Some(env) = placed_env {
+        config.shell_env = env;
         if let Some(wiring) = &jobs_wiring {
             config.jobs = Some(wiring.section.to_owned());
         }

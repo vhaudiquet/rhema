@@ -264,7 +264,7 @@ fn a_workspace_agents_skill_rides_the_seed_when_the_posture_mounts_nothing() {
 #[test]
 fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
     assert_eq!(
-        docker_run_argv("box", "/home/me/proj", None, None),
+        docker_run_argv("box", "/home/me/proj", None, None, None),
         vec![
             "run",
             "-d",
@@ -282,7 +282,7 @@ fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
     );
     let skills = Path::new("/h/.config/rhema/skills");
     assert_eq!(
-        docker_run_argv("box", "/home/me/proj", Some(skills), None),
+        docker_run_argv("box", "/home/me/proj", None, Some(skills), None),
         vec![
             "run",
             "-d",
@@ -302,7 +302,7 @@ fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
     );
     let agents = Path::new("/h/.agents/skills");
     assert_eq!(
-        docker_run_argv("box", "/home/me/proj", Some(skills), Some(agents)),
+        docker_run_argv("box", "/home/me/proj", None, Some(skills), Some(agents)),
         vec![
             "run",
             "-d",
@@ -314,6 +314,26 @@ fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
             "/h/.config/rhema/skills:/h/.config/rhema/skills:ro",
             "-v",
             "/h/.agents/skills:/h/.agents/skills:ro",
+            "debian:trixie",
+            "sleep",
+            "infinity",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>()
+    );
+    let runtime = Path::new("/run/user/1000/rhema");
+    assert_eq!(
+        docker_run_argv("box", "/home/me/proj", Some(runtime), None, None),
+        vec![
+            "run",
+            "-d",
+            "--name",
+            "box",
+            "-v",
+            "/home/me/proj:/home/me/proj",
+            "-v",
+            "/run/user/1000/rhema:/run/user/1000/rhema",
             "debian:trixie",
             "sleep",
             "infinity",
@@ -339,21 +359,52 @@ fn a_mount_set_missing_the_skills_bind_is_stale() {
     let mounts = r#"[{"Type":"bind","Source":"/home/me/proj","Destination":"/home/me/proj"}]"#;
     let skills = Some(Path::new("/h/.config/rhema/skills"));
     let agents = Some(Path::new("/h/.agents/skills"));
-    assert!(mounts_current(mounts, "/home/me/proj", None, None));
-    assert!(!mounts_current(mounts, "/home/me/proj", skills, None));
+    assert!(mounts_current(mounts, "/home/me/proj", None, None, None));
+    assert!(!mounts_current(mounts, "/home/me/proj", None, skills, None));
     let whole = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"}]"#;
-    assert!(mounts_current(whole, "/home/me/proj", skills, None));
+    assert!(mounts_current(whole, "/home/me/proj", None, skills, None));
     // Both global binds must be present: a container from before
     // the agents mount is stale, whatever else it carries.
-    assert!(!mounts_current(whole, "/home/me/proj", skills, agents));
+    assert!(!mounts_current(
+        whole,
+        "/home/me/proj",
+        None,
+        skills,
+        agents
+    ));
     let everything = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"},{"Source":"/h/.agents/skills"}]"#;
-    assert!(mounts_current(everything, "/home/me/proj", skills, agents));
+    assert!(mounts_current(
+        everything,
+        "/home/me/proj",
+        None,
+        skills,
+        agents
+    ));
     // A workspace that is a prefix of another mount's path does not
     // pass for its own bind.
     assert!(!mounts_current(
         r#"[{"Source":"/home/me/proj2"}]"#,
         "/home/me/proj",
         None,
+        None,
+        None
+    ));
+    // The runtime mount is part of the set: a container without it
+    // is stale even when the workspace and skills binds are right.
+    let runtime = Path::new("/run/user/1000/rhema");
+    assert!(!mounts_current(
+        whole,
+        "/home/me/proj",
+        Some(runtime),
+        skills,
+        None
+    ));
+    let shared = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"},{"Source":"/run/user/1000/rhema"}]"#;
+    assert!(mounts_current(
+        shared,
+        "/home/me/proj",
+        Some(runtime),
+        skills,
         None
     ));
 }
@@ -628,6 +679,7 @@ fn the_assembly_applies_tools_before_and_workspace_after_the_wire_order() {
         }],
         instance_lock: None,
         managed: None,
+        shared: None,
     };
     let mut config = HostAgentConfig::new(
         Arc::new(Unused),

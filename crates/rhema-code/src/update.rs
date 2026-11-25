@@ -327,7 +327,7 @@ fn fetch_url_blocking(url: &str) -> Result<String, String> {
 /// Fetches an install script and refuses it unless the published
 /// `<url>.sha256` sidecar matches. The sidecar rides the same host as
 /// the script, so this proves integrity, not authenticity.
-fn fetch_verified_script(url: &str) -> Result<String, String> {
+pub(crate) fn fetch_verified_script(url: &str) -> Result<String, String> {
     let script = fetch_url_blocking(url)?;
     let sidecar = fetch_url_blocking(&format!("{url}.sha256"))?;
     verify_sha256(script.as_bytes(), &sidecar)?;

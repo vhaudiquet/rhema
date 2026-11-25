@@ -2,10 +2,11 @@
 //! env, one set of prompt lines, per session key, held in the
 //! registry its owner hands it.
 //!
-//! The gate is the spec's §10 rule: a sandboxed session wires
-//! nothing, so nothing advertises what cannot run (`RunRequest`
-//! carries no environment, a provisioned map could not reach the
-//! executor anyway). Rewiring on a profile switch leaves the old
+//! A sandboxed session wires only when the backend shares a runtime
+//! root and the kit helper is installed there: the bridge binds under
+//! the shared root, so the sandbox-side stub reaches the same socket
+//! path. Without a shared root, or before the install, nothing is
+//! advertised. Rewiring on a profile switch leaves the old
 //! session's servers idling, the manager's children are stateful by
 //! design, and a playwright browser outliving a profile switch is a
 //! feature, not a leak.
@@ -13,8 +14,10 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use rhema_bash::runtime::KIT_VERSION;
 use rhema_config::Profile;
 use rhema_config::mcp::McpConfig;
 
@@ -23,11 +26,64 @@ use rhema_config::mcp::McpConfig;
 pub(crate) struct Entry {
     wiring: rhema_mcp::Wiring,
     /// Held for the directory's lifetime, the socket file and the
-    /// CLI's `RHEMA_MCP_TMP` live under it. A `TempDir` creates it
-    /// `0700`, gives it a random name, and removes it on drop, so
-    /// nothing else can pre-create or guess the path.
+    /// CLI's `RHEMA_MCP_TMP` live under it.
     #[allow(dead_code)]
-    session_dir: tempfile::TempDir,
+    session_dir: SessionDir,
+}
+
+/// The directory a session's socket and media live in. The local path
+/// owns a random `TempDir`; the sandboxed path owns a directory under
+/// the shared runtime root, so the socket path is the same on both
+/// sides, and removes it on drop.
+enum SessionDir {
+    Temp(tempfile::TempDir),
+    Shared(PathBuf),
+}
+
+impl SessionDir {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temp(dir) => dir.path(),
+            Self::Shared(path) => path,
+        }
+    }
+}
+
+impl Drop for SessionDir {
+    fn drop(&mut self) {
+        if let Self::Shared(path) = self {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// The per-process key a shared session dir is named under: the
+/// frontend's key plus the pid, so two processes on one profile do
+/// not bind the same socket. The sandbox sees the same name.
+pub(crate) fn runtime_session_key(session_key: &str) -> String {
+    let clean: String = session_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    format!("{clean}-{}", std::process::id())
+}
+
+/// Creates a session dir `0700` under the shared root.
+fn shared_session_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 impl Entry {
@@ -119,9 +175,6 @@ impl Registry {
         sandboxed: Option<&crate::sandbox::Sandboxed>,
         bash_env: Option<std::ffi::OsString>,
     ) -> Option<Arc<Entry>> {
-        if sandboxed.is_some() {
-            return None;
-        }
         let mut reg = self.entries.lock().expect("mcp registry lock");
         if let Some(entry) = reg.get(session_key) {
             return Some(entry.clone());
@@ -137,19 +190,37 @@ impl Registry {
         if all_disabled.contains(&String::from("*")) {
             return None;
         }
-        // The session dir owns the socket's directory; the init file
-        // lives in its own 0700 provision dir inside the system temp dir,
-        // not here.
-        // A private, random session dir: `tempfile` creates it `0700`
-        // atomically, so another user cannot pre-create a symlink at a
-        // predictable path under the system temp dir. The bridge and the
-        // generated CLI share it through `RHEMA_MCP_TMP`, not through a
-        // fixed name.
-        let session_dir = tempfile::Builder::new()
-            .prefix("rhema-mcp-session-")
-            .tempdir()
-            .ok()?;
-        let wiring = rhema_mcp::wire(
+        // The session dir owns the socket's directory. Local gets a
+        // private, random temp dir (`tempfile` creates it `0700`
+        // atomically, so another user cannot pre-create a symlink);
+        // a mounted sandbox gets `<root>/mcp/<key>`, the path both
+        // sides see. The bridge and the CLI share it through
+        // `RHEMA_MCP_TMP`.
+        let (session_dir, helper) = match sandboxed {
+            Some(sandboxed) => {
+                let shared = sandboxed.shared()?;
+                let helper = shared.install_dir(&KIT_VERSION.to_string()).join("rhema");
+                // The kit placement installs the helper in the shared
+                // root; until it is there the stub has nothing to exec,
+                // so the session advertises nothing.
+                if !helper.is_file() {
+                    return None;
+                }
+                let dir = shared.mcp_dir(&runtime_session_key(session_key));
+                shared_session_dir(&dir).ok()?;
+                (SessionDir::Shared(dir), Some(helper))
+            }
+            None => (
+                SessionDir::Temp(
+                    tempfile::Builder::new()
+                        .prefix("rhema-mcp-session-")
+                        .tempdir()
+                        .ok()?,
+                ),
+                None,
+            ),
+        };
+        let mut wiring = rhema_mcp::wire(
             &merged,
             all_disabled,
             session_dir.path(),
@@ -157,6 +228,15 @@ impl Registry {
             bash_env,
         )
         .ok()?;
+        if let Some(helper) = helper {
+            // The host's own executable is the wrong architecture for a
+            // sandbox on another machine: the stub execs the installed
+            // helper, at the path both sides see.
+            wiring.shell_env.insert(
+                "RHEMA_MCP_BIN".to_owned(),
+                helper.to_string_lossy().into_owned(),
+            );
+        }
         for notice in &wiring.notices {
             eprintln!("· {notice}");
         }
@@ -257,6 +337,64 @@ mod tests {
 
         drop(reg);
 
+        assert!(
+            !std::path::Path::new(&tmp).exists(),
+            "the session dir went with the entry"
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_session_binds_under_the_shared_root() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let install = root.path().join("bin").join(KIT_VERSION.to_string());
+        std::fs::create_dir_all(&install).expect("install dir");
+        let helper = install.join("rhema");
+        std::fs::write(&helper, "#!/bin/sh\nexit 0\n").expect("helper");
+
+        let mut profile = Profile::default();
+        profile
+            .mcp_servers
+            .insert("counter".to_owned(), entry("a counter"));
+        let sandboxed = crate::sandbox::Sandboxed {
+            choice: crate::args::SandboxChoice::Docker,
+            target: "box".to_owned(),
+            tools: std::sync::Arc::new(rhema_host_agent::ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+            shared: Some(rhema_sandbox::kit::SharedRoot::new(root.path())),
+        };
+        let reg = Registry::new();
+        let disabled = std::collections::BTreeSet::new();
+        let entry = reg
+            .wire_for_session("sandbox-key", &profile, &disabled, Some(&sandboxed), None)
+            .expect("wires against the shared root");
+        let tmp = entry
+            .shell_env()
+            .get("RHEMA_MCP_TMP")
+            .cloned()
+            .expect("session tmp");
+        assert!(
+            std::path::Path::new(&tmp).starts_with(root.path().join("mcp")),
+            "the socket dir rides the shared root: {tmp}"
+        );
+        assert_eq!(
+            entry.shell_env().get("RHEMA_MCP_BIN").map(String::as_str),
+            Some(helper.to_string_lossy().as_ref()),
+            "the stub execs the installed helper, not the host binary"
+        );
+        let socket = entry
+            .shell_env()
+            .get("RHEMA_MCP_BRIDGE")
+            .cloned()
+            .expect("bridge path");
+        assert!(
+            std::path::Path::new(&socket).starts_with(root.path().join("mcp")),
+            "the bridge binds under the shared root: {socket}"
+        );
+        drop(entry);
+        drop(reg);
         assert!(
             !std::path::Path::new(&tmp).exists(),
             "the session dir went with the entry"

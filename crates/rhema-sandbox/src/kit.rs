@@ -392,6 +392,97 @@ pub async fn ensure_shared(
     })
 }
 
+/// Places `kits` under a shared root the host can write directly:
+/// creates the session tree, writes the one init file, and answers
+/// the env map that points at it. No installer run and no guard: the
+/// caller owns the session's lifetime, and a stale tree is 1 KB. This
+/// is the sync half of [`ensure_shared`], for the frontends that place
+/// after the install check.
+///
+/// # Errors
+///
+/// A directory or file cannot be written.
+pub fn place_shared(
+    shared: &SharedRoot,
+    session: &str,
+    kits: &[Kit],
+) -> std::io::Result<BTreeMap<String, String>> {
+    let host_session = shared.session_dir(session);
+    for sub in ["vision/staging", "jobs", "mcp"] {
+        std::fs::create_dir_all(host_session.join(sub))?;
+    }
+    write_init(&host_session, kits)?;
+    let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
+    let helper = shared
+        .install_dir(&KIT_VERSION.to_string())
+        .join("rhema")
+        .to_string_lossy()
+        .into_owned();
+    let mut env = BTreeMap::new();
+    env.insert(
+        rhema_bash::init::VAR_BASH_ENV.to_owned(),
+        sandbox_session
+            .join("init.sh")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    for kit in kits {
+        for stub in &kit.stubs {
+            env.insert(stub.bin_var.clone(), helper.clone());
+        }
+        for (key, value) in &kit.vars {
+            env.insert(key.clone(), value.clone());
+        }
+    }
+    env.insert(
+        "RHEMA_VISION_STAGING".to_owned(),
+        sandbox_session
+            .join("vision/staging")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    env.insert(
+        "RHEMA_JOBS_SESSION".to_owned(),
+        sandbox_session
+            .join("jobs/session")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let tag = env
+        .get("RHEMA_SESSION")
+        .cloned()
+        .unwrap_or_else(|| session.to_owned());
+    std::fs::write(host_session.join("jobs/session"), tag)?;
+    Ok(env)
+}
+
+/// Runs the sandbox-side installer once, records the version, and
+/// probes the result. The install directory is `bin/<version>` under
+/// the shared root, the tree both sides see.
+///
+/// # Errors
+///
+/// The installer fails, the directory cannot be written, or the
+/// installed helper does not answer this host's [`KIT_VERSION`].
+pub async fn install(
+    sandbox: &dyn crate::Sandbox,
+    shared: &SharedRoot,
+    installer: &Installer,
+) -> Result<(), KitError> {
+    let version = KIT_VERSION.to_string();
+    let dir = shared.install_dir(&version);
+    std::fs::create_dir_all(&dir)?;
+    let sandbox_dir = Path::new(&shared.sandbox).join("bin").join(&version);
+    run_command(
+        sandbox,
+        installer.for_dir(&sandbox_dir.to_string_lossy()),
+        "the kit installer",
+    )
+    .await?;
+    std::fs::write(dir.join(".kit-version"), &version)?;
+    verify(sandbox, shared).await
+}
+
 /// Runs the installed helper in the sandbox and checks that it answers
 /// this host's [`KIT_VERSION`]. This is the check that catches a copy
 /// for the wrong architecture, and a install that is present but
@@ -453,6 +544,32 @@ mod tests {
 
     fn kit(feature: Feature, needs: Needs) -> Kit {
         Kit::new(feature, Vec::new(), needs)
+    }
+
+    #[test]
+    fn the_shared_placement_writes_the_init_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = SharedRoot::new(dir.path());
+        let kit = Kit::new(
+            Feature::Jobs,
+            vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
+            Needs::MACRO,
+        );
+        let env = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let init = env.get("BASH_ENV").expect("init");
+        assert_eq!(
+            init,
+            &dir.path()
+                .join("sessions/s1/init.sh")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert!(Path::new(init).is_file());
+        assert_eq!(
+            env.get("RHEMA_JOBS_BIN").map(String::as_str),
+            Some(dir.path().join("bin/1/rhema").to_string_lossy().as_ref())
+        );
+        assert!(dir.path().join("sessions/s1/jobs/session").is_file());
     }
 
     #[test]
