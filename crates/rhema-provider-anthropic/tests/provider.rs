@@ -1,6 +1,7 @@
 //! Offline integration tests: the provider against an in-process wiremock
 //! server speaking SSE. Zero network.
 
+use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, ToolResult, ToolSpec, Usage,
@@ -802,4 +803,137 @@ async fn a_non_zai_base_has_no_allowance_to_report() {
     let server = MockServer::start().await;
     let allowance = provider(&server).allowance().await;
     assert_eq!(allowance, Ok(None));
+}
+
+#[tokio::test]
+async fn a_rejected_thinking_form_retries_in_the_other_form() {
+    let server = MockServer::start().await;
+    // The id rule reads 4.5 as legacy, but the server says this model
+    // only takes the adaptive form: the retry follows the server.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}"#,
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    let mut req = request(vec![Message::text(Role::User, "hi")]);
+    req.params.thinking = ThinkingEffort::High;
+    let mut sink = Collector(vec![]);
+    let output = provider(&server)
+        .complete(req, &mut sink)
+        .await
+        .expect("the retry lands");
+    assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2);
+    let first: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(first["thinking"]["type"], "enabled");
+    assert_eq!(first["thinking"]["budget_tokens"], 32_768);
+    let second: Value = serde_json::from_slice(&received[1].body).expect("json body");
+    assert_eq!(
+        second["thinking"],
+        json!({ "type": "adaptive", "display": "summarized" })
+    );
+    assert_eq!(second["output_config"], json!({ "effort": "high" }));
+    assert!(
+        second["max_tokens"]
+            .as_u64()
+            .is_some_and(|ceiling| ceiling >= 32_768 + 4_096)
+    );
+}
+
+#[tokio::test]
+async fn an_adaptive_rejection_retries_with_the_budget_form() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"adaptive thinking is not supported on this model"}}"#,
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    let mut req = request(vec![Message::text(Role::User, "hi")]);
+    req.params.model = "claude-sonnet-4-6".into();
+    req.params.thinking = ThinkingEffort::Medium;
+    let mut sink = Collector(vec![]);
+    let output = provider(&server)
+        .complete(req, &mut sink)
+        .await
+        .expect("the retry lands");
+    assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2);
+    let first: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(first["thinking"]["type"], "adaptive");
+    assert_eq!(first["output_config"], json!({ "effort": "medium" }));
+    let second: Value = serde_json::from_slice(&received[1].body).expect("json body");
+    assert_eq!(
+        second["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 16_384 })
+    );
+    assert!(second.get("output_config").is_none(), "{second}");
+}
+
+#[tokio::test]
+async fn an_unrelated_400_is_never_retried_as_a_thinking_form() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(r#"{"type":"error","error":{"message":"bad request"}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut req = request(vec![Message::text(Role::User, "hi")]);
+    req.params.thinking = ThinkingEffort::High;
+    let mut sink = Collector(vec![]);
+    let err = provider(&server)
+        .complete(req, &mut sink)
+        .await
+        .expect_err("the server refuses");
+    assert!(
+        matches!(
+            err,
+            ProviderError::Api {
+                status: Some(400),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    server.verify().await;
 }

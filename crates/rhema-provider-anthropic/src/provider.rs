@@ -359,6 +359,39 @@ fn transport_error(err: TransportError) -> ProviderError {
     }
 }
 
+/// The thinking form to retry with when `err` is the API rejecting
+/// `style` for its model, `None` for every other failure. A request
+/// with no thinking level cannot hit the rejection, and a retry on an
+/// unrelated 400 would spend the turn twice.
+fn thinking_retry(
+    req: &ModelRequest,
+    err: &ProviderError,
+    style: crate::wire::ThinkingStyle,
+) -> Option<crate::wire::ThinkingStyle> {
+    if req.params.thinking == rhema_core::request::ThinkingEffort::Default {
+        return None;
+    }
+    let ProviderError::Api {
+        status: Some(400),
+        message,
+    } = err
+    else {
+        return None;
+    };
+    let message = message.to_ascii_lowercase();
+    let rejected = match style {
+        crate::wire::ThinkingStyle::Adaptive => {
+            message.contains("adaptive thinking is not supported")
+                || message.contains(r#""thinking.type.adaptive" is not supported"#)
+        }
+        crate::wire::ThinkingStyle::Legacy => {
+            message.contains(r#""thinking.type.enabled" is not supported"#)
+                || (message.contains("thinking.type.enabled") && message.contains("not supported"))
+        }
+    };
+    rejected.then(|| style.other())
+}
+
 /// Parses one SSE payload as a stream event and folds it into the
 /// assembler. An empty payload (keep-alive) is skipped.
 fn feed_chunk(
@@ -445,7 +478,31 @@ impl ModelProvider for AnthropicProvider {
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
         let req = req.normalized();
-        let body = crate::wire::request_body(&req)?;
+        let style = crate::wire::ThinkingStyle::for_model(&req.params.model);
+        match self.stream(&req, style, sink).await {
+            // A model the id rule cannot place is worth one retry in the
+            // other thinking form: the API names the form it wants, and
+            // a new release must not strand the turn over it.
+            Err(err) => match thinking_retry(&req, &err, style) {
+                Some(other) => self.stream(&req, other, sink).await,
+                None => Err(err),
+            },
+            result => result,
+        }
+    }
+}
+
+impl AnthropicProvider {
+    /// Sends one turn with `style`'s thinking form and drains its
+    /// stream. The retry on a thinking-form rejection lives in
+    /// [`ModelProvider::complete`], above this.
+    async fn stream(
+        &self,
+        req: &ModelRequest,
+        style: crate::wire::ThinkingStyle,
+        sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        let body = crate::wire::request_body_with(req, style)?;
         let url = format!("{}/v1/messages", self.base_url);
 
         let mut response = self

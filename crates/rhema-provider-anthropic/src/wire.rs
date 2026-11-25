@@ -36,6 +36,13 @@
 //!   prepends the matching `thinking` block ahead of the call, but only
 //!   while thinking stays enabled: the API rejects thinking blocks on
 //!   plain turns.
+//! - Thinking rides one of two forms: current Claude models take
+//!   `{"type": "adaptive"}` with the level in `output_config.effort`,
+//!   models up to 4.5 (and the non-Claude routes) the legacy
+//!   `{"type": "enabled", "budget_tokens": n}`. [`ThinkingStyle`] picks
+//!   from the model id, and the provider retries the other form when the
+//!   server rejects the one the name implied. Adaptive turns ask for
+//!   `display: "summarized"`, so the trace streams as before.
 //! - `tools[]` entries are `{name, description, input_schema}`;
 //!   `input_schema` is required and must be an object schema, so a
 //!   non-object spec degrades to the empty schema rather than dropping the
@@ -144,31 +151,118 @@ pub struct MessagesRequest {
     /// Stop sequences, when any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
-    /// Extended thinking, when the driver named a level: the API's knob
-    /// is a token budget, not a level, so the level maps onto one.
+    /// Extended thinking, when the driver named a level: the form
+    /// depends on the model, an adaptive switch on current models and a
+    /// manual token budget on older ones.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<WireThinking>,
+    /// The adaptive form's depth, when this request's thinking rides
+    /// that form. Current models read the depth from here, not from
+    /// `thinking.budget_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<WireOutputConfig>,
     /// Always `true`: the provider only speaks the streaming dialect.
     pub stream: bool,
 }
 
-/// The `thinking` request field: extended thinking with a token budget.
+/// The `thinking` request field. Current models take
+/// `{"type": "adaptive"}` and read the depth from `output_config.effort`;
+/// models up to Claude 4.5 only take `{"type": "enabled",
+/// "budget_tokens": n}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct WireThinking {
-    /// Always `"enabled"`; there is no disabled form, absence is.
+    /// `"adaptive"` or `"enabled"`; there is no disabled form, absence
+    /// is.
     #[serde(rename = "type")]
     pub kind: &'static str,
-    /// The reasoning token budget.
-    pub budget_tokens: u32,
+    /// The reasoning token budget, on the legacy form only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// How much of the trace comes back (`"summarized"`): the adaptive
+    /// form defaults to omitting it on current models, and the agent
+    /// surfaces the trace as it streams.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<&'static str>,
 }
 
-/// The reasoning budget a thinking level maps onto.
+/// The `output_config` request field: the effort knob adaptive thinking
+/// reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WireOutputConfig {
+    /// `"low"`, `"medium"`, or `"high"`.
+    pub effort: &'static str,
+}
+
+/// Which form a thinking level takes on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingStyle {
+    /// Current models: `thinking.type = "adaptive"` with the depth in
+    /// `output_config.effort`.
+    Adaptive,
+    /// Models up to Claude 4.5, and the non-Claude routes: a manual
+    /// `budget_tokens` beside `thinking.type = "enabled"`.
+    Legacy,
+}
+
+impl ThinkingStyle {
+    /// The form `model` takes. Claude 4.6 and later, and the Fable and
+    /// Mythos families, are adaptive; 4.5 and earlier only accept the
+    /// manual budget. A non-Claude model keeps the legacy form: the
+    /// Anthropic-compatible routes rhema addresses (Z.ai's plan) have
+    /// their own thinking contract, the one that shipped. An
+    /// unversioned Claude id is a current release, the adaptive form
+    /// being the one Anthropic documents for new models.
+    pub fn for_model(model: &str) -> Self {
+        let Some(rest) = model.strip_prefix("claude-") else {
+            return Self::Legacy;
+        };
+        // A version component is at most two digits; a longer run is
+        // the release date some ids carry (`claude-opus-4-20250514`),
+        // not a minor version.
+        let mut numbers = rest
+            .split(['-', '.'])
+            .filter_map(|part| part.parse::<u32>().ok())
+            .filter(|number| *number <= 99);
+        let Some(major) = numbers.next() else {
+            return Self::Adaptive;
+        };
+        let minor = numbers.next().unwrap_or(0);
+        if major > 4 || (major == 4 && minor >= 6) {
+            Self::Adaptive
+        } else {
+            Self::Legacy
+        }
+    }
+
+    /// The other form: what a request retries with when the server
+    /// rejects this one for its model.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Adaptive => Self::Legacy,
+            Self::Legacy => Self::Adaptive,
+        }
+    }
+}
+
+/// The reasoning budget a thinking level maps onto. On the adaptive form
+/// it is the proxy for how much room to leave beside the answer, not a
+/// budget sent on the wire.
 fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
     match thinking {
         ThinkingEffort::Default => None,
         ThinkingEffort::Low => Some(4_096),
         ThinkingEffort::Medium => Some(16_384),
         ThinkingEffort::High => Some(32_768),
+    }
+}
+
+/// The `output_config.effort` spelling of a thinking level.
+fn thinking_effort(thinking: ThinkingEffort) -> Option<&'static str> {
+    match thinking {
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Low => Some("low"),
+        ThinkingEffort::Medium => Some("medium"),
+        ThinkingEffort::High => Some("high"),
     }
 }
 
@@ -656,6 +750,23 @@ pub fn allowance(quota: &WireZaiQuota) -> Option<Allowance> {
 /// Fails with [`ProviderError::InvalidRequest`] when the model is unset or
 /// the request would produce no messages (the API rejects empty `messages`).
 pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError> {
+    request_body_with(req, ThinkingStyle::for_model(&req.params.model))
+}
+
+/// Builds the Messages request body for `req`, with the thinking level
+/// in `style`'s form. [`request_body`] picks the style from the model;
+/// the provider calls this to retry the other form when a server
+/// rejects the one the model name implied.
+///
+/// # Errors
+///
+/// Fails with [`ProviderError::InvalidRequest`] when the model is unset
+/// or the request would produce no messages (the API rejects empty
+/// `messages`).
+pub fn request_body_with(
+    req: &ModelRequest,
+    style: ThinkingStyle,
+) -> Result<MessagesRequest, ProviderError> {
     if req.params.model.trim().is_empty() {
         return Err(ProviderError::InvalidRequest(
             "chat params have no model".into(),
@@ -669,10 +780,26 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
     // Extended thinking is decided before the turns map: the assistant
     // replay below must know whether the API will accept thinking blocks
     // back on this request.
-    let thinking = thinking_budget(req.params.thinking).map(|budget| WireThinking {
-        kind: "enabled",
-        budget_tokens: budget,
-    });
+    let budget = thinking_budget(req.params.thinking);
+    let thinking = match (budget, style) {
+        (None, _) => None,
+        (Some(tokens), ThinkingStyle::Legacy) => Some(WireThinking {
+            kind: "enabled",
+            budget_tokens: Some(tokens),
+            display: None,
+        }),
+        (Some(_), ThinkingStyle::Adaptive) => Some(WireThinking {
+            kind: "adaptive",
+            budget_tokens: None,
+            display: Some("summarized"),
+        }),
+    };
+    let output_config = match (budget, style) {
+        (Some(_), ThinkingStyle::Adaptive) => {
+            thinking_effort(req.params.thinking).map(|effort| WireOutputConfig { effort })
+        }
+        _ => None,
+    };
     let mut messages: Vec<WireMessage> = Vec::new();
     for message in &req.messages {
         match message.role {
@@ -807,14 +934,16 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
             .collect()
     });
 
-    // The budget must sit below max_tokens, so a thinking request raises
-    // the ceiling when the driver's own is too tight; and the API
-    // rejects temperature modifications on thinking turns.
+    // Thinking tokens count toward max_tokens, so a thinking request
+    // raises the ceiling when the driver's own is too tight; the adaptive
+    // form has no sent budget, and its level's budget stands in for the
+    // room to leave. The API rejects temperature modifications on
+    // thinking turns.
     let max_tokens = req
         .params
         .max_tokens
         .unwrap_or(DEFAULT_MAX_TOKENS)
-        .max(thinking.map_or(0, |t| t.budget_tokens + 4_096));
+        .max(budget.map_or(0, |budget| budget + 4_096));
 
     Ok(MessagesRequest {
         model: req.params.model.clone(),
@@ -837,6 +966,7 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
         top_p: thinking.is_none().then_some(req.params.top_p).flatten(),
         stop_sequences: req.params.stop.clone(),
         thinking,
+        output_config,
         stream: true,
     })
 }
@@ -1360,6 +1490,89 @@ mod tests {
         let body = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
         assert!(body.get("thinking").is_none(), "{body}");
         assert_eq!(body["temperature"].as_f64(), Some(0.7f32 as f64));
+    }
+
+    #[test]
+    fn a_current_claude_takes_the_adaptive_form_and_an_old_one_the_budget() {
+        let make = |model: &str, thinking| ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: model.into(),
+                temperature: Some(0.7),
+                max_tokens: Some(4_096),
+                thinking,
+                top_p: None,
+                stop: Vec::new(),
+                session_id: None,
+            },
+        };
+
+        // 4.6 and later, the 5.x families, and an unversioned Claude id
+        // take the adaptive form; 4.5 and earlier only the budget.
+        for model in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-opus-5-5",
+            "claude-mythos-preview",
+        ] {
+            assert_eq!(
+                ThinkingStyle::for_model(model),
+                ThinkingStyle::Adaptive,
+                "{model}"
+            );
+        }
+        for model in [
+            "claude-sonnet-4-5",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-20250514",
+            "claude-3-7-sonnet-20250219",
+            "glm-5.3",
+        ] {
+            assert_eq!(
+                ThinkingStyle::for_model(model),
+                ThinkingStyle::Legacy,
+                "{model}"
+            );
+        }
+
+        let body = serde_json::to_value(
+            request_body(&make("claude-sonnet-4-6", ThinkingEffort::High)).unwrap(),
+        )
+        .expect("body serializes");
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+        assert!(body["thinking"].get("budget_tokens").is_none(), "{body}");
+        // No sent budget, but the level still leaves room beside the
+        // answer, and temperature stays off thinking turns.
+        assert!(
+            body["max_tokens"]
+                .as_u64()
+                .is_some_and(|ceiling| ceiling >= 32_768 + 4_096)
+        );
+        assert!(body.get("temperature").is_none(), "{body}");
+
+        let body = serde_json::to_value(
+            request_body(&make("claude-opus-4-5", ThinkingEffort::Medium)).unwrap(),
+        )
+        .expect("body serializes");
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 16_384 })
+        );
+        assert!(body.get("output_config").is_none(), "{body}");
+
+        // Default sends neither form.
+        let body = serde_json::to_value(
+            request_body(&make("claude-sonnet-4-6", ThinkingEffort::Default)).unwrap(),
+        )
+        .expect("body serializes");
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert!(body.get("output_config").is_none(), "{body}");
     }
 
     #[test]
