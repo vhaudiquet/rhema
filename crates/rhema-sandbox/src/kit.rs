@@ -609,13 +609,18 @@ mod tests {
         assert!(
             text.starts_with(&format!(
                 "export PATH='{}':",
-                dir.path().join("bin/1").display()
+                dir.path().join(format!("bin/{KIT_VERSION}")).display()
             )),
             "the helper's dir rides PATH for gob: {text}"
         );
         assert_eq!(
             env.get("RHEMA_JOBS_BIN").map(String::as_str),
-            Some(dir.path().join("bin/1/rhema").to_string_lossy().as_ref())
+            Some(
+                dir.path()
+                    .join(format!("bin/{KIT_VERSION}/rhema"))
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert!(dir.path().join("sessions/s1/jobs/session").is_file());
     }
@@ -703,7 +708,7 @@ mod tests {
                 code: Some(0),
             },
             crate::RunOutcome {
-                stdout: b"1\n".to_vec(),
+                stdout: format!("{KIT_VERSION}\n").into_bytes(),
                 stderr: Vec::new(),
                 code: Some(0),
             },
@@ -726,12 +731,17 @@ mod tests {
             placed.env
         );
         assert!(
-            placed.env["RHEMA_JOBS_BIN"].ends_with("/bin/1/rhema"),
+            placed.env["RHEMA_JOBS_BIN"].ends_with(&format!("/bin/{KIT_VERSION}/rhema")),
             "{:?}",
             placed.env
         );
         assert_eq!(placed.env["RHEMA_SESSION"], "s1");
-        assert!(shared.install_dir("1").join(".kit-version").is_file());
+        assert!(
+            shared
+                .install_dir(&KIT_VERSION.to_string())
+                .join(".kit-version")
+                .is_file()
+        );
         let commands = sandbox.executed();
         assert!(commands[0].contains("install-rhema"), "{commands:?}");
         assert!(commands[1].contains("__kit-version"), "{commands:?}");
@@ -748,7 +758,7 @@ mod tests {
         use crate::mock::ScriptedSandbox;
         let sandbox = ScriptedSandbox::new();
         sandbox.push_run(Ok(crate::RunOutcome {
-            stdout: b"1\n".to_vec(),
+            stdout: format!("{KIT_VERSION}\n").into_bytes(),
             stderr: Vec::new(),
             code: Some(0),
         }));
@@ -763,7 +773,7 @@ mod tests {
         use crate::mock::ScriptedSandbox;
         let sandbox = ScriptedSandbox::new();
         sandbox.push_run(Ok(crate::RunOutcome {
-            stdout: b"2\n".to_vec(),
+            stdout: b"999\n".to_vec(),
             stderr: Vec::new(),
             code: Some(0),
         }));
