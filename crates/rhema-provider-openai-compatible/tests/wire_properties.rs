@@ -384,7 +384,7 @@ fn chunks(script: &Script) -> Vec<ChatCompletionChunk> {
                 }
                 GenPiece::Fragment(fragment) => {
                     delta.tool_calls = Some(vec![WireToolCallDelta {
-                        index: fragment.index,
+                        index: Some(fragment.index),
                         id: fragment.id.clone(),
                         function: Some(WireFunctionDelta {
                             name: fragment.name.clone(),

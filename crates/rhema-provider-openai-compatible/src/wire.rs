@@ -519,9 +519,11 @@ pub struct WireDeltaPart {
 /// only argument text, never assume both arrive together.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct WireToolCallDelta {
-    /// Which call of the message this fragment belongs to.
+    /// Which call of the message this fragment belongs to. Optional
+    /// because some servers leave it out, and a fragment that defaulted
+    /// to `0` would fold every call of the message into the first.
     #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     /// The call's correlation id, on the first fragment.
     #[serde(default)]
     pub id: Option<String>,
@@ -748,10 +750,20 @@ pub fn request_body(req: &ModelRequest, dialect: &Dialect) -> ChatCompletionRequ
     for message in &req.messages {
         match message.role {
             Role::System => {
-                debug_assert!(
-                    false,
-                    "ModelRequest::normalized removes system messages before the wire"
-                );
+                // `ModelRequest::normalized` folds these into `system`
+                // upstream. A caller that skipped it still gets the text
+                // on the wire: a debug panic never fires in release, and
+                // the system turn would vanish there without a trace.
+                if let Some(content) = parts_of(message) {
+                    messages.push(WireMessage {
+                        role: "system".into(),
+                        content: Some(content),
+                        reasoning_content: None,
+                        reasoning: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
             }
             Role::User => {
                 if let Some(content) = parts_of(message) {
@@ -1103,15 +1115,23 @@ impl ChunkAssembler {
             });
         }
         if let Some(usage) = chunk.usage {
-            self.usage = Usage {
-                input_tokens: usage.prompt_tokens.unwrap_or(0),
-                output_tokens: usage.completion_tokens.unwrap_or(0),
-                cached_input_tokens: usage
-                    .prompt_tokens_details
-                    .and_then(|details| details.cached_tokens)
-                    .or(usage.prompt_cache_hit_tokens)
-                    .unwrap_or(0),
-            };
+            // A server may split its tally across chunks, prompt tokens
+            // on one and completion tokens on the next: a field the
+            // chunk leaves out keeps what an earlier chunk reported
+            // rather than zeroing it.
+            if let Some(tokens) = usage.prompt_tokens {
+                self.usage.input_tokens = tokens;
+            }
+            if let Some(tokens) = usage.completion_tokens {
+                self.usage.output_tokens = tokens;
+            }
+            if let Some(tokens) = usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens)
+                .or(usage.prompt_cache_hit_tokens)
+            {
+                self.usage.cached_input_tokens = tokens;
+            }
             // OpenAI-shaped wires carry usage only on the final chunk,
             // so this fires once, right before `StepEnd` says the same.
             sink.emit(Event::Usage(self.usage));
@@ -1207,7 +1227,23 @@ impl ChunkAssembler {
     /// Folds one tool-call fragment: the index's first fragment announces
     /// the call, every fragment with argument text feeds the args deltas.
     fn push_fragment(&mut self, fragment: WireToolCallDelta, sink: &mut dyn EventSink) {
-        let index = fragment.index;
+        // A server that omits the index still names each fragment by
+        // call id: reuse the call that id already owns, else open the
+        // next one. A fragment with neither id nor index continues the
+        // last call seen, which is how continuation fragments arrive.
+        let intended = fragment
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty() && *id != "null");
+        let index = fragment.index.unwrap_or_else(|| match intended {
+            Some(id) => self
+                .calls
+                .iter()
+                .find(|(_, call)| call.id.as_deref() == Some(id))
+                .map(|(index, _)| *index)
+                .unwrap_or_else(|| self.next_index()),
+            None => self.calls.keys().next_back().copied().unwrap_or(0),
+        });
         // Reasoning streamed since the last fragment led to this call,
         // claimed by its first fragment, appended when interleaved.
         let pending_reasoning = std::mem::take(&mut self.reasoning);
@@ -1254,10 +1290,25 @@ impl ChunkAssembler {
         }
     }
 
+    /// The index a call opened without one lands on.
+    fn next_index(&self) -> u32 {
+        self.calls
+            .keys()
+            .next_back()
+            .map_or(0, |last| last.saturating_add(1))
+    }
+
     /// Consumes the assembler into the final output. The message is always
     /// `Role::Assistant`: the streamed text as one part (chunk boundaries
     /// are transport artifacts), then tool calls in ascending index order;
     /// an empty stream yields an empty content list, not an error.
+    /// Whether any content arrived at all, text, reasoning, or a call
+    /// fragment. An empty stream is the documented empty answer; a
+    /// stream with content and no terminal chunk is a truncation.
+    pub fn saw_content(&self) -> bool {
+        !self.text.is_empty() || !self.reasoning.is_empty() || !self.calls.is_empty()
+    }
+
     /// Whether a chunk carried a `finish_reason`: the terminal proof
     /// this wire has (its `[DONE]` follows anyway), the drain checks
     /// it before standing the assembled output up as a result.
@@ -2567,5 +2618,78 @@ mod tests {
         // No entries, or an unparseable figure: no allowance.
         let empty: WireBalance = serde_json::from_str(r#"{"balance_infos":[]}"#).expect("parses");
         assert_eq!(allowance(&empty), None);
+    }
+}
+
+#[cfg(test)]
+mod fragment_tests {
+    use super::*;
+    use rhema_core::event::Event;
+
+    struct Silent;
+
+    impl EventSink for Silent {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    fn feed(assembler: &mut ChunkAssembler, json: &str) {
+        let chunk: ChatCompletionChunk = serde_json::from_str(json).expect("fixture parses");
+        assembler.push(chunk, &mut Silent).expect("chunk feeds");
+    }
+
+    /// Two calls in one message, each fragment naming its id and no
+    /// index: a defaulted index would fold both into the first call and
+    /// concatenate two JSON objects into one unparseable argument
+    /// string.
+    #[test]
+    fn parallel_calls_without_an_index_stay_apart() {
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
+        for json in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"read","arguments":"{\"path\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"arguments":"\"a.txt\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c2","function":{"name":"read","arguments":"{\"path\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c2","function":{"arguments":"\"b.txt\"}"}}]}}]}"#,
+        ] {
+            feed(&mut assembler, json);
+        }
+        let out = assembler.finish();
+
+        let calls: Vec<&ToolCall> = out
+            .message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2, "{:?}", out.message.content);
+        assert_eq!(calls[0].args, serde_json::json!({ "path": "a.txt" }));
+        assert_eq!(calls[1].args, serde_json::json!({ "path": "b.txt" }));
+    }
+
+    /// A server that splits its tally across chunks reports both halves:
+    /// the last chunk's missing field must not zero the first chunk's.
+    #[test]
+    fn a_split_usage_tally_merges() {
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
+        feed(
+            &mut assembler,
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+        );
+        feed(
+            &mut assembler,
+            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#,
+        );
+
+        let out = assembler.finish();
+        assert_eq!(
+            out.usage,
+            Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                cached_input_tokens: 4,
+            }
+        );
     }
 }

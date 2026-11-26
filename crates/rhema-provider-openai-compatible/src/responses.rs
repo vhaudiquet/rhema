@@ -796,8 +796,12 @@ impl ResponsesAssembler {
                 name: &partial.name,
             });
         }
-        if let Some(arguments) = &item.arguments {
-            partial.arguments = arguments.clone();
+        // The done event carries the item's final arguments, but a
+        // server may send an empty string where the field is absent: an
+        // empty value is no verdict on what the deltas already streamed,
+        // and replacing with it runs the tool on `{}`.
+        if let Some(arguments) = item.arguments.as_deref().filter(|args| !args.is_empty()) {
+            partial.arguments = arguments.to_owned();
         }
     }
 
@@ -1501,5 +1505,48 @@ mod tests {
         assert_eq!(calls[0].args, serde_json::json!({"x": 1}));
         assert_eq!(calls[1].id, "fc_b");
         assert_eq!(calls[1].args, serde_json::json!({}));
+    }
+}
+
+#[cfg(test)]
+mod done_item_tests {
+    use super::*;
+    use rhema_core::event::Event;
+
+    struct Silent;
+
+    impl EventSink for Silent {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    fn event(json: &str) -> WireStreamEvent {
+        serde_json::from_str(json).expect("event fixture parses")
+    }
+
+    /// A done item whose `arguments` is the empty string says nothing
+    /// about what the deltas streamed; replacing with it runs the tool
+    /// on `{}`.
+    #[test]
+    fn an_empty_done_arguments_keeps_the_streamed_pieces() {
+        let mut assembler = ResponsesAssembler::new();
+        for fixture in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{
+                "type":"function_call","call_id":"fc_1","name":"bash","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","call_id":"fc_1","delta":"{\"command\":"}"#,
+            r#"{"type":"response.function_call_arguments.delta","call_id":"fc_1","delta":"\"ls\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{
+                "type":"function_call","call_id":"fc_1","name":"bash",
+                "arguments":"","status":"completed"}}"#,
+        ] {
+            assembler
+                .push(event(fixture), &mut Silent)
+                .expect("event is not an error");
+        }
+
+        let out = assembler.finish();
+        let [Content::ToolCall(call)] = &out.message.content[..] else {
+            panic!("one call: {:?}", out.message.content);
+        };
+        assert_eq!(call.args, serde_json::json!({ "command": "ls" }));
     }
 }

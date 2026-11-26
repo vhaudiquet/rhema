@@ -259,7 +259,11 @@ async fn the_base_url_is_used_verbatim_including_its_path() {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string("data: [DONE]\n\n"),
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},",
+                    "\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                )),
         )
         .mount(&server)
         .await;
@@ -753,4 +757,36 @@ async fn trailing_slashes_in_the_base_url_are_trimmed() {
         .await
         .expect("models parse");
     assert_eq!(models.len(), 1);
+}
+
+/// A sentinel with no `finish_reason` behind it is the shape a proxy
+/// leaves when it drops the last content chunk and forwards `[DONE]`.
+/// Committing what streamed would make half an answer the turn's.
+#[tokio::test]
+async fn a_done_sentinel_without_a_finish_reason_is_a_truncation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"half\"},\"finish_reason\":null}]}\n\n",
+                    "data: [DONE]\n\n",
+                )),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new("secret-key").with_base_url(base(&server));
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request(vec![Message::text(Role::User, "hi")], vec![]),
+            &mut sink,
+        )
+        .await
+        .expect_err("the half answer is not a result");
+
+    assert!(matches!(err, ProviderError::Network(_)), "{err:?}");
 }
