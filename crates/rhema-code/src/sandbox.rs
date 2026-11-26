@@ -731,7 +731,12 @@ pub async fn assemble(
         .iter()
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
-    ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await?;
+    if let Err(err) = ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await {
+        // The instance this assembly derived is already up, and no
+        // `Sandboxed` exists to stop it on the way out.
+        abandon_instance(managed.as_ref(), instance_lock.as_ref());
+        return Err(err);
+    }
     // A mounted backend now has its helper: the sandbox's own
     // installer fetches the release for the sandbox's target, and the
     // shared root carries it. An install that fails closes the kits
@@ -787,8 +792,10 @@ pub async fn assemble(
     // under the exclusive hold. Downgrade to the session's shared
     // posture; the lock rides `Sandboxed` out to the exit path.
     if let Some(lock) = instance_lock.as_ref() {
-        lock.share()
-            .map_err(|err| anyhow::anyhow!("the sandbox lock: {err}"))?;
+        lock.share().map_err(|err| {
+            abandon_instance(managed.as_ref(), instance_lock.as_ref());
+            anyhow::anyhow!("the sandbox lock: {err}")
+        })?;
     }
     let mcp = crate::mcp_config::McpStore::for_sandbox(
         Arc::clone(&sandbox),
@@ -982,6 +989,40 @@ impl Sandboxed {
             ),
             Err(err) => eprintln!("warning: the {} instance stays up: {err}", managed.name),
         }
+    }
+}
+
+/// Stops an instance a failed assembly created, so a fall-back to the
+/// host does not leave a container running with no owner. The lock is
+/// still held exclusively here, so no peer can have attached; a
+/// derived instance the user named themselves is never touched.
+fn abandon_instance(managed: Option<&ManagedInstance>, lock: Option<&InstanceLock>) {
+    let Some(managed) = managed else {
+        return;
+    };
+    if lock.is_some_and(|lock| !lock.is_sole()) {
+        return;
+    }
+    let program = match managed.kind {
+        ManagedKind::Docker => "docker",
+        ManagedKind::Lxd => "lxc",
+    };
+    let mut argv = vec!["stop".to_owned()];
+    if managed.kind == ManagedKind::Lxd {
+        argv.push("--timeout=30".to_owned());
+    }
+    argv.push(managed.name.clone());
+    match stop_instance(program, &argv) {
+        Ok(true) => eprintln!(
+            "sandbox: stopped {} after the assembly failed",
+            managed.name
+        ),
+        Ok(false) => eprintln!(
+            "warning: the {} instance stays up: `{program} {}` failed",
+            managed.name,
+            argv.join(" ")
+        ),
+        Err(err) => eprintln!("warning: the {} instance stays up: {err}", managed.name),
     }
 }
 
