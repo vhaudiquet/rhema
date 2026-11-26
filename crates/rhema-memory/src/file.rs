@@ -44,7 +44,7 @@
 //! `forget` still removes them.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -164,8 +164,25 @@ fn serialize(record: &MemoryRecord) -> Result<String, MemoryError> {
 fn write_file(path: &Path, record: &MemoryRecord) -> Result<(), MemoryError> {
     let text = serialize(record)?;
     let tmp = path.with_extension("md.tmp");
-    fs::write(&tmp, text)?;
-    let file = fs::File::open(&tmp)?;
+    // A memory file holds conversation-derived content, so it lands
+    // `0600` at creation like every other store's files; a plain
+    // `fs::write` takes the umask's `0644`.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    // `mode` applies at creation only: a temp left by an older build
+    // keeps the umask's `0644` through the rename without this.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
+    file.write_all(text.as_bytes())?;
     file.sync_all()?;
     drop(file);
     fs::rename(&tmp, path)?;

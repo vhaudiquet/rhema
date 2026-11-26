@@ -276,3 +276,21 @@ fn a_verify_refreshes_only_the_verification_stamp() {
         "the file gains the check's stamp, nothing else: {after}"
     );
 }
+
+/// A memory record holds conversation-derived content: it lands `0600`
+/// at creation, not the umask's `0644`.
+#[test]
+#[cfg(unix)]
+fn a_record_file_lands_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    let record = store
+        .put(MemoryDraft::new(Scope::Global, "a private note"))
+        .unwrap();
+
+    let path = dir.path().join(format!("{}.md", record.id));
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{} is {mode:o}", path.display());
+}
