@@ -112,6 +112,16 @@ fn identity(message: &Message) -> u64 {
                 h = push(h, result.content.as_bytes());
             }
             Content::Image(image) => h = push(h, image.media_type.as_str().as_bytes()),
+            // A kind this test does not model still feeds the hash, so
+            // two different unknown parts cannot collide.
+            _ => {
+                h = push(
+                    h,
+                    rhema_transcript::summary::unknown_bytes(content)
+                        .to_le_bytes()
+                        .as_slice(),
+                )
+            }
         }
     }
     h

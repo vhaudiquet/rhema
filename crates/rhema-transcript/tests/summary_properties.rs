@@ -13,7 +13,7 @@ use hegel::generators::{self as gs, TextGenerator};
 use rhema_core::{Content, Image, ImageMediaType, Message, Role, ToolResult};
 use rhema_transcript::summary::{
     HEAD_BYTES, IMAGE_BYTES, IMAGE_TOKENS, head, message_bytes, message_images, message_tokens,
-    one_line, render_message, text_tokens,
+    one_line, render_message, text_tokens, unknown_bytes,
 };
 
 /// Text with the shapes that stress flattening and byte cutting:
@@ -171,6 +171,13 @@ fn the_byte_and_token_figures_price_every_part(tc: TestCase) {
                 tokens += IMAGE_TOKENS;
                 images += 1;
             }
+            // The generator draws the four kinds above only; the arm
+            // mirrors the library's fallback.
+            _ => {
+                bytes += unknown_bytes(content);
+                tokens += text_tokens(unknown_bytes(content));
+                images += 1;
+            }
         }
     }
     assert_eq!(message_bytes(&message), bytes, "the byte figure diverged");
@@ -215,6 +222,7 @@ fn the_byte_and_token_figures_price_every_part(tc: TestCase) {
                     "the render lost an image line:\n{render:?}"
                 );
             }
+            _ => {}
         }
     }
 }

@@ -125,6 +125,7 @@ impl Default for ToolContext {
 /// `Unsafe` one is reported interrupted so the model can verify state
 /// before retrying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ReplaySafety {
     /// Re-running may repeat an external effect, a post, a merge, a
     /// delete. The default: an unclassified tool is treated as

@@ -1447,6 +1447,10 @@ pub(crate) fn estimate_history_tokens(history: &[Message]) -> u64 {
                 Content::ToolCall(call) => chars += call.args.to_string().len(),
                 Content::ToolResult(result) => chars += result.content.len(),
                 Content::Image(_) => images += 1,
+                // A kind this build does not know still rides the
+                // request: it charges its sent size, so the gauge reads
+                // low rather than free.
+                _ => chars += rhema_transcript::summary::unknown_bytes(content),
             }
         }
     }

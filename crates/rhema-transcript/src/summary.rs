@@ -32,6 +32,14 @@ pub const USER_BYTES: usize = 8 * 1024;
 /// never remove. One image is charged as one small message.
 pub const IMAGE_BYTES: usize = 1024;
 
+/// The bytes a content kind this build does not know costs: its
+/// serialized size, so a part added to [`Content`] later enters the
+/// budget at what it sends instead of for free. The arms below price
+/// the kinds they know; this one keeps an unknown kind honest.
+pub fn unknown_bytes(content: &Content) -> usize {
+    serde_json::to_string(content).map_or(0, |json| json.len())
+}
+
 /// The bytes a message costs the budget: text, tool-call arguments,
 /// and tool-result content, summed, with each image at [`IMAGE_BYTES`]
 /// instead of its encoded length. This is the unit the view's budget
@@ -45,6 +53,7 @@ pub fn message_bytes(message: &Message) -> usize {
             Content::ToolCall(call) => call.name.len() + call.args.to_string().len(),
             Content::ToolResult(result) => result.content.len() + result.images.len() * IMAGE_BYTES,
             Content::Image(_) => IMAGE_BYTES,
+            _ => unknown_bytes(content),
         })
         .sum()
 }
@@ -76,6 +85,7 @@ pub fn message_tokens(message: &Message) -> u64 {
                 text_tokens(result.content.len()) + result.images.len() as u64 * IMAGE_TOKENS
             }
             Content::Image(_) => IMAGE_TOKENS,
+            _ => text_tokens(unknown_bytes(content)),
         })
         .sum()
 }
@@ -194,6 +204,10 @@ pub(crate) fn summarize_range(messages: &[Message], range: Range) -> ((usize, us
                 // counts: a digest that skips the images it covers
                 // hides what zoom is there to reopen.
                 Content::Image(_) => images += 1,
+                // A kind this build cannot read still occupies the
+                // range: count it as one bare part, the same as an
+                // image, so the digest does not report an empty range.
+                _ => images += 1,
             }
         }
     }
@@ -289,6 +303,14 @@ pub fn render_message(message: &Message) -> String {
                     out.push('\n');
                 }
                 out.push_str(&format!("[image: {}]", image.media_type.as_str()));
+            }
+            // Zoom promises the messages whole: a kind this build
+            // cannot render says so rather than reading as absent.
+            _ => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("[content this build cannot render]");
             }
         }
     }

@@ -221,7 +221,9 @@ fn user_parts(message: &Message) -> Vec<Value> {
                 "type": "input_image",
                 "image_url": image_url(image),
             })),
-            Content::ToolCall(_) | Content::ToolResult(_) => None,
+            // A user turn carries text and images; anything else has
+            // no item shape on this wire.
+            _ => None,
         })
         .collect()
 }

@@ -947,7 +947,9 @@ fn parts_of(message: &Message) -> Option<WireContent> {
                         url: format!("data:{};base64,{}", image.media_type.as_str(), image.data),
                     },
                 }),
-                Content::ToolCall(_) | Content::ToolResult(_) => None,
+                // A user turn carries text and images; anything else
+                // has no part shape on this wire.
+                _ => None,
             })
             .collect(),
     ))

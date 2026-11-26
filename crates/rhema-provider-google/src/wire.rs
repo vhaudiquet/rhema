@@ -573,6 +573,9 @@ pub fn request_body_with(
                     }),
                     ..WirePart::default()
                 }),
+                // A kind with no Gemini shape is left off the turn: the
+                // same drop the adapter makes for a block it cannot map.
+                _ => {}
             }
         }
         if parts.is_empty() {

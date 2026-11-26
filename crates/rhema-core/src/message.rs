@@ -32,6 +32,7 @@ pub enum Role {
 /// is the remaining `{media_type, data}` object shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Content {
     /// Plain text.
     Text(String),

@@ -149,6 +149,8 @@ impl Transcript {
                             Content::ToolResult(_) => {}
                             // Assistant turns carry no image blocks.
                             Content::Image(_) => {}
+                            // Nor a kind this build does not render.
+                            _ => {}
                         }
                     }
                 }

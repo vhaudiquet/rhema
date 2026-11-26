@@ -2387,6 +2387,7 @@ mod tests {
                 Content::ToolCall(call) => format!("call:{}", call.id),
                 Content::ToolResult(_) => "result".to_owned(),
                 Content::Image(_) => "image".to_owned(),
+                _ => "other".to_owned(),
             })
             .collect();
         assert_eq!(kinds, ["call:toolu_b", "text:after", "call:toolu_d"]);

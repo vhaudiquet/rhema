@@ -27,6 +27,7 @@ use crate::tool::{
 
 /// Why a step or a turn failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentError {
     /// The agent was built without a [`ModelProvider`].
     #[error("agent built without a model provider")]

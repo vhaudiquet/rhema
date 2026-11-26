@@ -445,6 +445,17 @@ fn add_message_content(content: &mut LogContent, message: &Message) {
                 Role::Assistant => content.assistant_text += summary::IMAGE_TOKENS,
                 Role::System | Role::Tool => {}
             },
+            // A kind the split does not price yet joins the role's own
+            // bucket at its sent size, the same tiling rule the image
+            // arm follows.
+            _ => {
+                let tokens = summary::text_tokens(summary::unknown_bytes(part));
+                match message.role {
+                    Role::User => content.user_text += tokens,
+                    Role::Assistant => content.assistant_text += tokens,
+                    Role::System | Role::Tool => {}
+                }
+            }
         }
     }
 }
@@ -782,6 +793,10 @@ impl Transcript {
                     // Shares spreads tokens over the categories it names,
                     // and none of them is a bare image.
                     Content::Image(_) => {}
+                    // An unknown part still costs the request bytes: it
+                    // joins the calls' row, the one that prices what the
+                    // wire carries beside the conversation.
+                    _ => shares.tool_calls += summary::unknown_bytes(content),
                 }
             }
         }

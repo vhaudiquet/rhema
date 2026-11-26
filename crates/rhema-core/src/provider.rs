@@ -16,6 +16,7 @@ use crate::request::ModelRequest;
 
 /// Why a model call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProviderError {
     /// The provider rejected or failed the call (HTTP error, bad key, ...).
     /// The HTTP status rides structurally, not in the message text: `Some`
