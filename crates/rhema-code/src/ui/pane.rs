@@ -432,11 +432,16 @@ pub(crate) fn render_transcript(
     for (index, piece) in app.bubble_pieces.iter_mut().enumerate() {
         piece.slot = index as u16 + 1;
     }
+    let total = rows.len();
+    // The window, sliced off the owned rows rather than scrolled:
+    // `Paragraph::scroll` takes a `u16` row offset, so past 65 535 rows
+    // the drawn window stopped where the selection geometry kept
+    // going. Slicing costs nothing, the rows move instead of copying.
+    let window: Vec<Line> = rows.into_iter().skip(top).collect();
     // The rows the frame draws, as plain text: the cells a mouse
     // selection maps onto and copies from.
-    let visible_rows: Vec<String> = rows
+    let visible_rows: Vec<String> = window
         .iter()
-        .skip(top)
         .take(visible)
         .map(|line| {
             line.spans
@@ -445,11 +450,8 @@ pub(crate) fn render_transcript(
                 .collect()
         })
         .collect();
-    let total = rows.len();
     frame.render_widget(
-        Paragraph::new(rows)
-            .scroll((top as u16, 0))
-            .style(Style::default().bg(theme.sunken).fg(theme.text)),
+        Paragraph::new(window).style(Style::default().bg(theme.sunken).fg(theme.text)),
         inner,
     );
     app.transcript_view = crate::app::selection::TranscriptView {
