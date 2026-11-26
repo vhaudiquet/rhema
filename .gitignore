@@ -5,3 +5,4 @@ Cargo.lock.bak
 .zcode/
 /.rhema/chrome-profile/
 /.rhema/webshot.png
+/.rhema/*.log
