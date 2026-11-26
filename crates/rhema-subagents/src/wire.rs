@@ -216,8 +216,22 @@ pub fn wire_at(global: Option<&Path>, config: &mut HostAgentConfig) -> SubagentH
     );
     let handle = tools.handle();
     config.tools = Some(shell);
-    config.extra_resolver = Some(tools);
-    config.steering = Some(handle.steering());
+    // An extension already in either slot stays reachable: the
+    // resolver chains through `Overlay` and the steering through
+    // `SteeringChain`. Overwriting them used to silence whichever
+    // frontend wired its extension first.
+    let resolver: Arc<dyn rhema_core::ToolResolver> = tools;
+    config.extra_resolver = Some(match config.extra_resolver.take() {
+        Some(existing) => Arc::new(rhema_core::Overlay::new(existing, resolver)),
+        None => resolver,
+    });
+    let steering = handle.steering();
+    config.steering = Some(match config.steering.take() {
+        Some(existing) => Arc::new(rhema_host_agent::SteeringChain::new(vec![
+            existing, steering,
+        ])),
+        None => steering,
+    });
     handle
 }
 
@@ -663,5 +677,85 @@ mod tests {
             subagent_base_system(&config, workspace.path()),
             "the replacement"
         );
+    }
+}
+
+#[cfg(test)]
+mod extension_chain_tests {
+    use super::*;
+
+    struct Never;
+
+    #[async_trait::async_trait]
+    impl rhema_core::ModelProvider for Never {
+        async fn complete(
+            &self,
+            _req: rhema_core::ModelRequest,
+            _sink: &mut dyn rhema_core::EventSink,
+        ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
+            Ok(rhema_core::ModelOutput {
+                message: rhema_core::Message::text(rhema_core::Role::Assistant, "never"),
+                stop_reason: rhema_core::StopReason::EndTurn,
+                usage: rhema_core::Usage::default(),
+            })
+        }
+    }
+
+    /// A resolver another extension already installed.
+    struct Existing;
+
+    #[async_trait::async_trait]
+    impl rhema_core::ToolResolver for Existing {
+        fn specs(&self) -> Vec<rhema_core::ToolSpec> {
+            vec![rhema_core::ToolSpec::new(
+                "search",
+                "the other extension's tool",
+                serde_json::json!({ "type": "object" }),
+            )]
+        }
+
+        async fn resolve(
+            &self,
+            call: rhema_core::ToolCall,
+            _ctx: &rhema_core::ToolContext,
+        ) -> rhema_core::ToolResult {
+            rhema_core::ToolResult::success(call.id, "from the other extension")
+        }
+    }
+
+    /// The other extension's steering feed.
+    struct ExistingSteering;
+
+    impl rhema_host_agent::Steering for ExistingSteering {
+        fn drain(&self) -> Vec<String> {
+            vec!["the other extension finished".to_owned()]
+        }
+    }
+
+    /// A config that already carries an extension must keep it: the
+    /// subagent wire composes, it does not overwrite.
+    #[test]
+    fn wiring_the_subagent_keeps_an_earlier_extensions_resolver_and_steering() {
+        let global = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = HostAgentConfig::new(
+            Arc::new(Never),
+            "m",
+            workspace.path(),
+            rhema_host_agent::AllowAll,
+        );
+        config.extra_resolver = Some(Arc::new(Existing));
+        config.steering = Some(Arc::new(ExistingSteering));
+
+        let handle = wire_at(Some(global.path()), &mut config);
+
+        let after = config.extra_resolver.clone().expect("still installed");
+        let names: Vec<String> = after.specs().into_iter().map(|spec| spec.name).collect();
+        assert!(names.contains(&"search".to_owned()), "{names:?}");
+        assert!(names.contains(&"subagent".to_owned()), "{names:?}");
+        // Both steering feeds drain, the earlier one first.
+        let drained = config.steering.as_ref().expect("chained").drain();
+        assert_eq!(drained, vec!["the other extension finished".to_owned()]);
+        let _ = handle;
     }
 }
