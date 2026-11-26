@@ -508,11 +508,11 @@ impl App {
             None => rhema_config::Home::discover().ok(),
         };
         let config_root = rhema_home.as_ref().map(|home| home.config.clone());
-        // Jobs are local by construction: a sandbox session's shells
-        // run elsewhere, so there is nothing here to watch (the wiring
-        // in `session_agent_config` is gated the same way). Spawned
-        // before the screen builds, so the first session's config
-        // chains the subscription's steering with the subagent registry's.
+        // A local session holds `gob events`; a sandboxed one polls
+        // its own listing, because the daemon is behind the backend.
+        // Spawned before the screen builds, so the first session's
+        // config chains the feed's steering with the subagent
+        // registry's.
         //
         // The tag is the conversation's: the file its turns checkpoint
         // to, which is `--save` when given and the allocated session
@@ -526,11 +526,10 @@ impl App {
             .as_deref()
             .and_then(crate::jobs::tag_from_path)
             .unwrap_or_else(crate::jobs::fallback_tag);
-        let jobs = setup
-            .sandboxed
-            .is_none()
-            .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
-            .flatten();
+        let jobs = match &setup.sandboxed {
+            None => crate::jobs::JobsHandle::spawn(jobs_tag.clone()),
+            Some(assembled) => assembled.spawn_jobs_handle(&jobs_tag),
+        };
         // A session that came from a file may hold work the last process
         // left running. Loading tells the truth and starts nothing:
         // adopt from the children and the daemon, settle what the crash
@@ -541,7 +540,7 @@ impl App {
                 sessions_base.as_deref(),
                 &startup_workspace,
                 &jobs_tag,
-                jobs.is_some(),
+                jobs.as_ref().is_some_and(|jobs| !jobs.is_remote()),
             );
             match rhema_submissions::reconcile(&mut session, &kinds, rhema_submissions::now()) {
                 Ok(changes) => {

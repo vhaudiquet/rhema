@@ -54,7 +54,7 @@
 //! rule telling the truth: a query-only drain protects a fetch, and
 //! a job has none.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -64,6 +64,7 @@ use std::time::{Duration, Instant};
 
 use rhema_bash::jobs::{EXIT_NO_BACKEND, EventKind, JobEvent, JobRow};
 use rhema_host_agent::Steering;
+use rhema_sandbox::{OutputOnly, RunRequest, Sandbox};
 
 /// How long the reconnect waits before reopening the stream, and how
 /// long a stop-record re-read gives the shim's append to land. Short:
@@ -79,6 +80,29 @@ const SLICE: Duration = Duration::from_millis(100);
 /// append follows `gob stop`'s exit within milliseconds; the event
 /// can arrive first, because the daemon emits as it kills.
 const STOP_RECORD_GRACE: Duration = Duration::from_millis(300);
+
+/// How long the remote poller waits between two listings of a
+/// sandbox's gob. A sandbox has no event stream this process can hold:
+/// the gob daemon is behind SSH or HTTP, so the listing is the only
+/// observation point. Short enough that a finished job reaches the
+/// model on the next step, long enough that the exec does not compete
+/// with the agent's own shell.
+const REMOTE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The budget one remote listing gets. A busy or booting sandbox can
+/// take seconds; a poll that hangs must not outlive the interval by
+/// much, and the next tick retries.
+const REMOTE_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The line the remote listing script prints between its JSON rows and
+/// the self-stop record. The script is shell, so the marker is its only
+/// framing.
+const REMOTE_STOPPED_MARKER: &str = "__RHEMA_JOBS_STOPPED__";
+
+/// The line the script prints instead of a listing when the helper
+/// cannot answer. A failed poll is not an empty one: treating it as
+/// empty would mint a vanish-finish for every tracked job.
+const REMOTE_FAILED_MARKER: &str = "__RHEMA_JOBS_FAILED__";
 
 /// One job as the strip draws it: the shim's row plus the age this
 /// process has watched it, which is the only clock available without
@@ -341,6 +365,10 @@ pub struct JobsHandle {
     /// This session's tag: the self-stop record's name, removed when
     /// the handle drops, the session's suppressions history with it.
     session: String,
+    /// Whether this handle reads a sandbox listing. The startup
+    /// reconciler has no async path to that listing, so it registers
+    /// the job kind only for a local gob.
+    remote: bool,
 }
 
 impl Drop for JobsHandle {
@@ -397,6 +425,62 @@ impl JobsHandle {
             child,
             stop,
             session,
+            remote: false,
+        })
+    }
+
+    /// Starts the listing poller over a sandbox's own gob, or `None`
+    /// when there is no sandbox to poll.
+    ///
+    /// The local [`Self::spawn`] holds `gob events` open. A sandboxed
+    /// session has no such stream: the daemon lives behind SSH or
+    /// HTTP. This poller runs the jobs shim inside the sandbox on a
+    /// timer, reconciles the listing exactly like a reconnect, and
+    /// mints the same finish feed. The trade is latency, not semantics.
+    pub fn spawn_remote(
+        sandbox: Arc<dyn Sandbox>,
+        workspace: String,
+        session: String,
+        helper: String,
+        helper_dir: String,
+        session_file: String,
+    ) -> Option<Self> {
+        if session.is_empty() {
+            return None;
+        }
+        let entries = Arc::new(Mutex::new(Snapshot::new()));
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let child = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_entries = Arc::clone(&entries);
+        let thread_feed = Arc::clone(&feed);
+        let thread_stop = Arc::clone(&stop);
+        let thread_session = session.clone();
+        std::thread::Builder::new()
+            .name("rhema-jobs-remote".to_owned())
+            .spawn(move || {
+                poll_remote(
+                    RemoteJobs {
+                        sandbox,
+                        workspace,
+                        session: thread_session,
+                        helper,
+                        helper_dir,
+                        session_file,
+                    },
+                    thread_entries,
+                    thread_feed,
+                    thread_stop,
+                )
+            })
+            .ok()?;
+        Some(Self {
+            entries,
+            feed,
+            child,
+            stop,
+            session,
+            remote: true,
         })
     }
 
@@ -404,6 +488,12 @@ impl JobsHandle {
     /// id, so a resumed process lists the same jobs it started.
     pub fn tag(&self) -> &str {
         &self.session
+    }
+
+    /// Whether this feed reads a sandbox's listing rather than this
+    /// host's `gob events`.
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 
     /// Adds a finish the subscription did not observe, the
@@ -596,6 +686,7 @@ impl JobsHandle {
             child: Arc::new(Mutex::new(None)),
             stop: Arc::new(AtomicBool::new(false)),
             session: fallback_tag(),
+            remote: false,
         }
     }
 
@@ -619,6 +710,7 @@ impl JobsHandle {
             child: Arc::new(Mutex::new(None)),
             stop: Arc::new(AtomicBool::new(false)),
             session: fallback_tag(),
+            remote: false,
         }
     }
 }
@@ -876,6 +968,131 @@ kill "$2" 2>/dev/null"#,
             return;
         }
     }
+}
+
+/// What one remote poll needs: the sandbox, where its shell starts,
+/// and the installed helper's paths. A struct because the loop would
+/// otherwise carry six positional strings into every call.
+struct RemoteJobs {
+    sandbox: Arc<dyn Sandbox>,
+    workspace: String,
+    session: String,
+    helper: String,
+    helper_dir: String,
+    session_file: String,
+}
+
+/// The remote poll loop: one listing every [`REMOTE_POLL_INTERVAL`],
+/// reconciled like a reconnect. The runtime is this thread's own; the
+/// sandbox backend's async clients do not need the frontend's.
+fn poll_remote(
+    jobs: RemoteJobs,
+    shared: Arc<Mutex<Snapshot>>,
+    feed: Arc<Mutex<Feed>>,
+    stop: Arc<AtomicBool>,
+) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let mut watch = Watch::default();
+    let mut seen: HashMap<String, Instant> = HashMap::new();
+    let mut stopped: HashSet<String> = HashSet::new();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let listing = runtime.block_on(remote_listing(&jobs, &stop));
+        if let Some((rows, recorded)) = listing {
+            stopped.extend(recorded);
+            if let Ok(mut feed) = feed.lock() {
+                reconcile(&mut watch, &mut feed, &rows, &stopped);
+            }
+            publish(&shared, &mut seen, &watch);
+        }
+        if sleep_slices(&stop, REMOTE_POLL_INTERVAL) {
+            return;
+        }
+    }
+}
+
+/// One remote listing and the session's self-stop record, in one exec.
+/// `None` when the poll could not answer: an unreachable sandbox, a
+/// helper that failed, or a listing that did not parse. A missed poll
+/// is skipped, never read as an empty one.
+async fn remote_listing(
+    jobs: &RemoteJobs,
+    stop: &AtomicBool,
+) -> Option<(Vec<JobRow>, HashSet<String>)> {
+    let tag = rhema_sandbox::exec_util::shquote(&jobs.session);
+    let dir = rhema_sandbox::exec_util::shquote(&jobs.helper_dir);
+    let bin = rhema_sandbox::exec_util::shquote(&jobs.helper);
+    // The helper runs in the sandbox's own env; the PATH prefix makes
+    // `gob` resolve beside the installed helper even when the session
+    // env does not carry the kit's PATH. The final `|| true` keeps the
+    // exec green when there is no stop record: an absent record is the
+    // normal case, not a failed poll.
+    let command = format!(
+        "PATH={dir}:$PATH; export PATH\n\
+         tag={tag}\n\
+         if out=$({bin} __jobs ls --json --session \"$tag\" 2>/dev/null); then\n\
+           printf '%s\\n' \"$out\"\n\
+         else\n\
+           printf '%s\\n' {failed}\n\
+         fi\n\
+         printf '%s\\n' {marker}\n\
+         f=\"${{TMPDIR:-/tmp}}/rhema-jobs-$tag-stopped\"\n\
+         if [ -f \"$f\" ]; then mv \"$f\" \"$f.$$\" 2>/dev/null && {{ cat \"$f.$$\"; rm -f \"$f.$$\"; }}; fi || true\n",
+        failed = REMOTE_FAILED_MARKER,
+        marker = REMOTE_STOPPED_MARKER,
+    );
+    let mut env = BTreeMap::new();
+    env.insert(rhema_bash::jobs::VAR_BIN.to_owned(), jobs.helper.clone());
+    env.insert(
+        rhema_bash::jobs::VAR_SESSION.to_owned(),
+        jobs.session.clone(),
+    );
+    env.insert(
+        rhema_bash::jobs::VAR_SESSION_FILE.to_owned(),
+        jobs.session_file.clone(),
+    );
+    let mut progress = OutputOnly(|_| {});
+    let outcome = jobs
+        .sandbox
+        .run(
+            RunRequest {
+                command,
+                cwd: PathBuf::from(&jobs.workspace),
+                timeout: REMOTE_LIST_TIMEOUT,
+                env,
+            },
+            stop,
+            &mut progress,
+        )
+        .await
+        .ok()?;
+    parse_remote_listing(&String::from_utf8_lossy(&outcome.stdout))
+}
+
+/// Parses the listing script's output: the JSON rows, the marker, then
+/// the self-stop ids. `None` for a failed or malformed poll, which the
+/// loop skips instead of reconciling.
+fn parse_remote_listing(stdout: &str) -> Option<(Vec<JobRow>, HashSet<String>)> {
+    let (rows, stopped) = stdout.split_once(REMOTE_STOPPED_MARKER)?;
+    let rows = rows.trim();
+    if rows.is_empty() || rows == REMOTE_FAILED_MARKER {
+        return None;
+    }
+    let rows = serde_json::from_str::<Vec<JobRow>>(rows).ok()?;
+    let stopped = stopped
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some((rows, stopped))
 }
 
 #[cfg(test)]
@@ -1267,6 +1484,52 @@ esac
         set_test_backend(None);
         assert_eq!(started.len(), 1);
         assert_eq!(started[0].id, "e2j");
+    }
+
+    #[tokio::test]
+    async fn a_remote_listing_asks_the_sandbox_helper_and_reads_the_record() {
+        use rhema_sandbox::mock::ScriptedSandbox;
+        let sandbox = std::sync::Arc::new(ScriptedSandbox::new());
+        sandbox.push_run(Ok(rhema_sandbox::RunOutcome {
+            stdout: b"[]\n__RHEMA_JOBS_STOPPED__\nzz\n".to_vec(),
+            stderr: Vec::new(),
+            code: Some(0),
+        }));
+        let stop = AtomicBool::new(false);
+        let jobs = RemoteJobs {
+            sandbox: sandbox.clone(),
+            workspace: "/workspace".to_owned(),
+            session: "s1".to_owned(),
+            helper: "/helper/rhema".to_owned(),
+            helper_dir: "/helper".to_owned(),
+            session_file: "/runtime/jobs/session".to_owned(),
+        };
+        let (rows, stopped) = remote_listing(&jobs, &stop).await.expect("a listing");
+        assert!(rows.is_empty());
+        assert!(stopped.contains("zz"));
+        let command = sandbox.executed().remove(0);
+        assert!(command.contains("__jobs ls --json --session"));
+        assert!(command.contains("rhema-jobs-$tag-stopped"));
+    }
+
+    #[test]
+    fn a_remote_listing_splits_rows_and_stop_ids() {
+        let text = concat!(
+            r#"[{"id":"a","status":"running","exit_code":null,"command":"npm run dev","session":"s1","started_at":null}]"#,
+            "\n__RHEMA_JOBS_STOPPED__\nb\n"
+        );
+        let (rows, stopped) = parse_remote_listing(text).expect("a listing");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "a");
+        assert!(stopped.contains("b"));
+    }
+
+    #[test]
+    fn a_remote_failed_poll_is_not_an_empty_listing() {
+        let text = "__RHEMA_JOBS_FAILED__\n__RHEMA_JOBS_STOPPED__\n";
+        assert!(parse_remote_listing(text).is_none());
+        assert!(parse_remote_listing("[]\n__RHEMA_JOBS_STOPPED__\n").is_some());
+        assert!(parse_remote_listing("not json\n__RHEMA_JOBS_STOPPED__\n").is_none());
     }
 
     #[test]

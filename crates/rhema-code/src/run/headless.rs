@@ -270,14 +270,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     // The subscription is the notification feed: the one turn's driver
     // steers from it, so a job that dies mid-run is announced at the
     // next step boundary instead of waiting for a `job ls` that never
-    // comes. The one-shot has no idle path: a job outliving the run is
-    // the daemon's, and a later run sees it only through `job ls`.
-    // The host poller reads this host's gob; a sandboxed run's jobs
-    // live in the sandbox's, so no finish feed is possible here.
-    let jobs_feed = (sandboxed.is_none()
-        && sections.contains_key(&rhema_bash::runtime::Feature::Jobs))
-    .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
-    .flatten();
+    // comes. A local run holds `gob events`; a remote run polls the
+    // sandbox's own listing, because its daemon is behind the backend.
+    let jobs_feed = if sections.contains_key(&rhema_bash::runtime::Feature::Jobs) {
+        match &sandboxed {
+            None => crate::jobs::JobsHandle::spawn(jobs_tag.clone()),
+            Some(assembled) => assembled.spawn_jobs_handle(&jobs_tag),
+        }
+    } else {
+        None
+    };
     let vision = if sandboxed.is_some() {
         if let Some(remote) = remote {
             let mut env = std::collections::BTreeMap::new();

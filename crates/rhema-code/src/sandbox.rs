@@ -851,6 +851,34 @@ impl Sandboxed {
         self.remote.as_ref()
     }
 
+    /// Starts the remote jobs poller for `tag`, when this assembly has
+    /// a listing to poll: a helper, `gob` beside it, and the sandbox
+    /// to run the listing in.
+    pub(crate) fn spawn_jobs_handle(&self, tag: &str) -> Option<crate::jobs::JobsHandle> {
+        // Ecrou's one-shot machines lose the daemon between commands;
+        // polling one would only burn a boot per tick. SSH and HTTP
+        // keep a daemon, so their listing is the missing event stream.
+        if !matches!(
+            self.choice,
+            crate::args::SandboxChoice::Ssh | crate::args::SandboxChoice::Http
+        ) {
+            return None;
+        }
+        let remote = self.remote.as_ref()?;
+        if !remote.gob {
+            return None;
+        }
+        let sandbox = self.sandbox.clone()?;
+        crate::jobs::JobsHandle::spawn_remote(
+            sandbox,
+            self.workspace.clone(),
+            tag.to_owned(),
+            remote.helper.clone(),
+            remote.helper_dir.clone(),
+            remote.jobs_session(tag),
+        )
+    }
+
     /// Whether the installed helper can serve search and decide, the
     /// two kits whose state lives entirely in the env.
     pub(crate) fn helper_available(&self) -> bool {

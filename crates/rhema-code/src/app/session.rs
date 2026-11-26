@@ -355,7 +355,7 @@ impl App {
 
     /// The kinds this build links for one loaded session: the turn
     /// kind always, the subagent kind when a store is reachable, the
-    /// job kind when a subscription is running.
+    /// job kind when a local subscription is running.
     pub(crate) fn kinds_for(
         sessions_base: Option<&Path>,
         workspace: &Path,
@@ -408,7 +408,7 @@ impl App {
             base.as_deref(),
             &workspace,
             &self.jobs_tag,
-            self.jobs.is_some(),
+            self.jobs.as_ref().is_some_and(|jobs| !jobs.is_remote()),
         );
         match rhema_submissions::reconcile(session, &kinds, rhema_submissions::now()) {
             Ok(changes) => {
@@ -609,79 +609,88 @@ impl App {
         }
         // The jobs subscription saw its own starts; the same write applies,
         // and a row the ledger already names is skipped: the load's
-        // adopt wrote it, and a second record would be a second job.
+        // adopt wrote it, and a second record would be a second job. A
+        // remote feed has no synchronous kind to recover its records at
+        // load, so it drains its queues without writing a record that
+        // the next reconcile could not settle.
         if let Some(jobs) = self.jobs.as_ref() {
-            let known: Vec<String> = rhema_submissions::snapshot(agent.session())
-                .map(|snapshot| {
-                    snapshot
-                        .iter()
-                        .filter(|record| record.kind.as_str() == "job")
-                        .filter_map(|record| {
-                            serde_json::from_value::<rhema_bash::jobs::kind::Payload>(
-                                record.payload.clone(),
-                            )
-                            .ok()
-                            .map(|payload| payload.id)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            for started in jobs.take_started() {
-                if known.contains(&started.id) {
-                    continue;
-                }
-                let payload = serde_json::json!({
-                    "tag": jobs.tag(),
-                    "id": started.id,
-                    "command": started.command,
-                });
-                let at = rhema_submissions::now();
-                if let Ok(record) = rhema_submissions::submit(
-                    agent.session_mut(),
-                    rhema_submissions::KindName::new(rhema_bash::jobs::kind::NAME)
-                        .expect("the job kind name is valid"),
-                    payload,
-                    at,
-                ) && rhema_submissions::start(agent.session_mut(), &record.id, at, None).is_ok()
-                {
-                    changed = true;
-                }
-            }
-            // A record settles when the subscription mints its finish,
-            // without waiting for a load. The ids come from the feed,
-            // so no extra listing is asked.
-            let finished = jobs.take_finished_ids();
-            if !finished.is_empty() {
-                let running: Vec<(rhema_submissions::SubmissionId, String)> =
-                    rhema_submissions::snapshot(agent.session())
-                        .map(|snapshot| {
-                            snapshot
-                                .iter()
-                                .filter(|record| {
-                                    record.kind.as_str() == "job"
-                                        && record.status == rhema_submissions::Status::Running
-                                })
-                                .filter_map(|record| {
-                                    serde_json::from_value::<rhema_bash::jobs::kind::Payload>(
-                                        record.payload.clone(),
-                                    )
-                                    .ok()
-                                    .map(|payload| (record.id.clone(), payload.id))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                for (id, backend_id) in running {
-                    if finished.contains(&backend_id)
-                        && rhema_submissions::settle(
-                            agent.session_mut(),
-                            &id,
-                            rhema_submissions::Outcome::Done,
-                            rhema_submissions::now(),
-                        )
+            if jobs.is_remote() {
+                let _ = jobs.take_started();
+                let _ = jobs.take_finished_ids();
+            } else {
+                let known: Vec<String> = rhema_submissions::snapshot(agent.session())
+                    .map(|snapshot| {
+                        snapshot
+                            .iter()
+                            .filter(|record| record.kind.as_str() == "job")
+                            .filter_map(|record| {
+                                serde_json::from_value::<rhema_bash::jobs::kind::Payload>(
+                                    record.payload.clone(),
+                                )
+                                .ok()
+                                .map(|payload| payload.id)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for started in jobs.take_started() {
+                    if known.contains(&started.id) {
+                        continue;
+                    }
+                    let payload = serde_json::json!({
+                        "tag": jobs.tag(),
+                        "id": started.id,
+                        "command": started.command,
+                    });
+                    let at = rhema_submissions::now();
+                    if let Ok(record) = rhema_submissions::submit(
+                        agent.session_mut(),
+                        rhema_submissions::KindName::new(rhema_bash::jobs::kind::NAME)
+                            .expect("the job kind name is valid"),
+                        payload,
+                        at,
+                    ) && rhema_submissions::start(agent.session_mut(), &record.id, at, None)
                         .is_ok()
                     {
                         changed = true;
+                    }
+                }
+                // A record settles when the subscription mints its finish,
+                // without waiting for a load. The ids come from the feed,
+                // so no extra listing is asked.
+                let finished = jobs.take_finished_ids();
+                if !finished.is_empty() {
+                    let running: Vec<(rhema_submissions::SubmissionId, String)> =
+                        rhema_submissions::snapshot(agent.session())
+                            .map(|snapshot| {
+                                snapshot
+                                    .iter()
+                                    .filter(|record| {
+                                        record.kind.as_str() == "job"
+                                            && record.status == rhema_submissions::Status::Running
+                                    })
+                                    .filter_map(|record| {
+                                        serde_json::from_value::<rhema_bash::jobs::kind::Payload>(
+                                            record.payload.clone(),
+                                        )
+                                        .ok()
+                                        .map(|payload| (record.id.clone(), payload.id))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    for (id, backend_id) in running {
+                        if finished.contains(&backend_id)
+                            && rhema_submissions::settle(
+                                agent.session_mut(),
+                                &id,
+                                rhema_submissions::Outcome::Done,
+                                rhema_submissions::now(),
+                            )
+                            .is_ok()
+                        {
+                            changed = true;
+                        }
                     }
                 }
             }

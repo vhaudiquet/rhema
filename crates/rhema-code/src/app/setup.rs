@@ -1045,14 +1045,8 @@ pub(crate) fn session_agent_config(
     rhema_subagents::SubagentHandle,
     Vec<String>,
 ) {
-    // A sandboxed session's jobs run in the sandbox's gob; the host
-    // poller reads this host's, so its finish feed would announce the
-    // wrong daemon. The model polls `job ls` instead.
-    let jobs_steering = if sandboxed.is_some() {
-        None
-    } else {
-        jobs_steering
-    };
+    // The caller builds the feed for the daemon it actually has: the
+    // host's event stream locally, the sandbox's listing remotely.
     let mut config = agent_config(
         provider.clone(),
         options,
