@@ -10,30 +10,30 @@ authors.workspace = true
 
 [dependencies]
 # The step engine: a subagent is a fresh Agent on a fresh Session
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # The child is a real session in the store, and its parent's record of
 # the work rides the parent's own ledger
-rhema-session-store = { path = "../rhema-session-store", version = "0.4.2" }
-rhema-submissions = { path = "../rhema-submissions", version = "0.4.2" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
+rhema-submissions = { path = "../rhema-submissions", version = "0.5.0" }
 # The background-tuned retry wrapper: a job rides the frontend's turn
 # provider wrapped once more, so an outage waits out under the job
 # instead of killing it
-rhema-provider = { path = "../rhema-provider", version = "0.4.2" }
+rhema-provider = { path = "../rhema-provider", version = "0.5.0" }
 # The tools: the inner shell and the approval hook, and the system
 # prompt with its skills list. Default features off so a wasm build
 # (remote-shell sandbox, no tokio processes) excludes the local shell;
 # the inner shell shares the parent turn's executor, so nothing here
 # needs it.
-rhema-bash = { path = "../rhema-bash", version = "0.4.2", default-features = false }
-rhema-prompt = { path = "../rhema-prompt", version = "0.4.2" }
-rhema-skills = { path = "../rhema-skills", version = "0.4.2" }
+rhema-bash = { path = "../rhema-bash", version = "0.5.0", default-features = false }
+rhema-prompt = { path = "../rhema-prompt", version = "0.5.0" }
+rhema-skills = { path = "../rhema-skills", version = "0.5.0" }
 # `wire` attaches the tool to a host-agent config
-rhema-host-agent = { path = "../rhema-host-agent", version = "0.4.2", default-features = false }
+rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.0", default-features = false }
 # The global definitions directory resolves off the config dir
-rhema-config = { path = "../rhema-config", version = "0.4.2" }
+rhema-config = { path = "../rhema-config", version = "0.5.0" }
 # The bounded request view: the inner agent reads its history through
 # it, so a long call re-sends a bounded prompt, not a growing one
-rhema-transcript = { path = "../rhema-transcript", version = "0.4.2" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.5.0" }
 # Definitions round-trip through YAML frontmatter
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -49,7 +49,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 # comes back for the tests that really run commands.
 rhema-core = { path = "../rhema-core", features = ["mock"] }
 # The reference store, so a child session is a real file
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.4.2" }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
 rhema-bash = { path = "../rhema-bash", features = ["local-shell"] }
 rhema-host-agent = { path = "../rhema-host-agent", features = ["local-shell"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

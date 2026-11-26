@@ -16,7 +16,7 @@ store-contract = []
 
 [dependencies]
 # The saved value is rhema-core's caller-owned Session
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # SessionId's Serialize/Deserialize
 serde = { workspace = true }
 # Corrupt bodies carry the parser's error

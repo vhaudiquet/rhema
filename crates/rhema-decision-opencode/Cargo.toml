@@ -18,7 +18,7 @@ native = ["dep:reqwest"]
 
 [dependencies]
 # The seam this crate implements and the vocabulary it speaks
-rhema-decision = { path = "../rhema-decision", version = "0.4.2", default-features = false }
+rhema-decision = { path = "../rhema-decision", version = "0.5.0", default-features = false }
 serde_json = { workspace = true }
 # dyn DecisionProvider
 async-trait = { workspace = true }

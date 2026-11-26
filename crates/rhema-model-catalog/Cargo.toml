@@ -20,9 +20,9 @@ testing = []
 
 [dependencies]
 # The ProviderError the decorating listing returns unchanged
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # ModelCard, Pricing, and the ModelListing seam the decorator wraps
-rhema-provider = { path = "../rhema-provider", version = "0.4.2", default-features = false }
+rhema-provider = { path = "../rhema-provider", version = "0.5.0", default-features = false }
 # The decorator implements an async trait
 async-trait = { workspace = true }
 # The cache envelope and the facts records

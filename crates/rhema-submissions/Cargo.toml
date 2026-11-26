@@ -14,9 +14,9 @@ mock = ["rhema-core/mock"]
 
 [dependencies]
 # The Session the ledger rides in, the engine the turn kind drives
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # SubmissionId is the store's validated SessionId
-rhema-session-store = { path = "../rhema-session-store", version = "0.4.2" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Typed public errors
@@ -24,8 +24,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 # The reference store, for the round-trip test through a real file
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.4.2" }
-rhema-core = { path = "../rhema-core", version = "0.4.2", features = ["mock"] }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
+rhema-core = { path = "../rhema-core", version = "0.5.0", features = ["mock"] }
 tempfile = "3"
 tokio = { workspace = true }
 

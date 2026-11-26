@@ -9,8 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
-rhema-skills = { path = "../rhema-skills", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
+rhema-skills = { path = "../rhema-skills", version = "0.5.0" }
 serde_json = { workspace = true }
 # The template engine (Jinja syntax); whitespace rules fit markdown templates
 minijinja = { workspace = true }

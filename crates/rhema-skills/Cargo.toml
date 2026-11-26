@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # Skill frontmatter is YAML
 serde_yaml = { workspace = true }
 serde = { workspace = true }

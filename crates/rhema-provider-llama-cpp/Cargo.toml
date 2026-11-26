@@ -9,11 +9,11 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # The shared SSE decoder
-rhema-provider = { path = "../rhema-provider", version = "0.4.2", features = ["http-client"] }
+rhema-provider = { path = "../rhema-provider", version = "0.5.0", features = ["http-client"] }
 # The OpenAI chat-completions dialect core this adapter speaks
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.4.2" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

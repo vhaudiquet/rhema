@@ -9,16 +9,16 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.4.2" }
+rhema-core = { path = "../rhema-core", version = "0.5.0" }
 # The shared model card, SSE decoder, and login-flow seam
-rhema-provider = { path = "../rhema-provider", version = "0.4.2", features = ["http-client"] }
+rhema-provider = { path = "../rhema-provider", version = "0.5.0", features = ["http-client"] }
 # The OpenAI chat-completions dialect core this adapter speaks
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.4.2" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.5.0" }
 # The Anthropic Messages wire Claude models run through: Copilot serves
 # them at its /v1/messages route, where prompt caching needs
 # caller-placed breakpoints, so this adapter reuses the native wire
 # wholesale behind a token-swapping transport
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.4.2" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
