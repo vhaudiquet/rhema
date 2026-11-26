@@ -50,6 +50,15 @@
 //! item's `added` event with argument pieces as deltas, and usage from
 //! the terminal event. Event types the assembler does not know are
 //! ignored, so servers free to grow the vocabulary stay compatible.
+//!
+//! The terminal event's `output` array is read for its error, usage
+//! and incomplete reason, never as a replacement for the stream. Its
+//! calls carry no `provider_data`, so the reasoning this adapter
+//! attaches to each streamed call would be lost, and a compatible
+//! server may send only the last item in that array. The chatgpt
+//! adapter's assembler (`rhema-provider-chatgpt`) does the opposite
+//! because its backend proxies the stream and may send the whole
+//! answer in the terminal event alone: there the array is the answer.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
