@@ -1082,38 +1082,55 @@ pub(crate) fn session_agent_config(
     }
     let missing_tools = apply_prompt_sections(&mut config, options, sandboxed);
     // Every kit this session places shares one init file: the stub
-    // text is static, the per-session values are env. The wirings
-    // still provision their state and prompt section; the kit owns
-    // the file and its env. A mounted sandbox takes jobs and vision
-    // state from the shared session tree; ssh and http have no root
-    // yet, so they get neither.
+    // text is static, the per-session values are env. A mounted sandbox
+    // reads the file from the shared root; a sandbox with no root reads
+    // the static file from its own cache, and the per-session state
+    // lives under the same cache.
     let inherited = std::env::var_os("BASH_ENV");
     let mut kits = Vec::new();
-    // A mounted sandbox keeps jobs and vision state under its shared
-    // session tree; the wirings live in the process registry because
-    // dropping one deletes the directory. A sandbox with no shared
-    // root (ssh, http) gets neither yet.
+    let mut sections: std::collections::BTreeMap<Feature, &'static str> =
+        std::collections::BTreeMap::new();
     let key = crate::shared_kit::runtime_session_key(session_key);
     let shared_kits = sandboxed
         .and_then(|sandboxed| sandboxed.shared())
         .map(|shared| crate::shared_kit::wire(shared, &key, jobs_tag));
+    let remote = sandboxed.and_then(|sandboxed| sandboxed.remote());
     let jobs_ephemeral =
         sandboxed.is_some_and(|sandboxed| sandboxed.choice == crate::args::SandboxChoice::Ecrou);
-    let jobs_wiring = if sandboxed.is_some() {
+
+    let jobs = if sandboxed.is_some() {
         if jobs_ephemeral {
             // A job's gob daemon dies with the boot; every command is
             // a fresh machine, so `job run` would always fail.
             None
+        } else if let Some(remote) = remote {
+            remote.gob.then(|| {
+                let mut env = std::collections::BTreeMap::new();
+                env.insert(
+                    rhema_bash::jobs::VAR_SESSION.to_owned(),
+                    jobs_tag.to_owned(),
+                );
+                env.insert(
+                    rhema_bash::jobs::VAR_SESSION_FILE.to_owned(),
+                    remote.jobs_session(&key),
+                );
+                (env, rhema_bash::jobs::PROMPT_SECTION)
+            })
         } else {
-            shared_kits.as_ref().and_then(|kits| kits.jobs.clone())
+            shared_kits
+                .as_ref()
+                .and_then(|kits| kits.jobs.clone())
+                .map(|wiring| (wiring.shell_env.clone(), wiring.section))
         }
     } else {
-        rhema_bash::jobs::wire(None, jobs_tag).cloned()
+        rhema_bash::jobs::wire(None, jobs_tag)
+            .cloned()
+            .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
-    if let Some(wiring) = &jobs_wiring {
+    if let Some((env, section)) = jobs {
         kits.push(kit_for(
             Feature::Jobs,
-            wiring.shell_env.clone(),
+            env,
             vec![builtin_stub(
                 rhema_bash::jobs::NAME,
                 rhema_bash::jobs::VAR_BIN,
@@ -1121,16 +1138,32 @@ pub(crate) fn session_agent_config(
             )],
             Needs::MACRO,
         ));
+        sections.insert(Feature::Jobs, section);
     }
-    let vision_wiring = if sandboxed.is_some() {
-        shared_kits.as_ref().and_then(|kits| kits.vision.clone())
+
+    let vision = if sandboxed.is_some() {
+        if let Some(remote) = remote {
+            let mut env = std::collections::BTreeMap::new();
+            env.insert(
+                rhema_bash::vision::VAR_STAGING.to_owned(),
+                remote.vision_staging(&key),
+            );
+            Some((env, rhema_bash::vision::PROMPT_SECTION))
+        } else {
+            shared_kits
+                .as_ref()
+                .and_then(|kits| kits.vision.clone())
+                .map(|wiring| (wiring.shell_env.clone(), wiring.section))
+        }
     } else {
-        rhema_bash::vision::wire(None).cloned()
+        rhema_bash::vision::wire(None)
+            .cloned()
+            .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
-    if let Some(wiring) = &vision_wiring {
+    if let Some((env, section)) = vision {
         kits.push(kit_for(
             Feature::Vision,
-            wiring.shell_env.clone(),
+            env,
             vec![builtin_stub(
                 rhema_bash::vision::NAME,
                 rhema_bash::vision::VAR_BIN,
@@ -1138,18 +1171,21 @@ pub(crate) fn session_agent_config(
             )],
             Needs::MACRO,
         ));
+        sections.insert(Feature::Vision, section);
     }
-    let search_wiring = crate::search_wire::wire_for_session(
+
+    let search = crate::search_wire::wire_for_session(
         session_key,
         profile,
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
         None,
-    );
-    if let Some(wiring) = &search_wiring {
+    )
+    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    if let Some((env, section)) = search {
         kits.push(kit_for(
             Feature::Search,
-            wiring.shell_env.clone(),
+            env,
             vec![builtin_stub(
                 rhema_bash::websearch::NAME,
                 rhema_bash::websearch::VAR_BIN,
@@ -1157,18 +1193,21 @@ pub(crate) fn session_agent_config(
             )],
             Needs::HOST_CALL,
         ));
+        sections.insert(Feature::Search, section);
     }
-    let decision_wiring = crate::decision_wire::wire_for_session(
+
+    let decision = crate::decision_wire::wire_for_session(
         session_key,
         profile,
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
         None,
-    );
-    if let Some(wiring) = &decision_wiring {
+    )
+    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    if let Some((env, section)) = decision {
         kits.push(kit_for(
             Feature::Decision,
-            wiring.shell_env.clone(),
+            env,
             vec![builtin_stub(
                 rhema_bash::decision::NAME,
                 rhema_bash::decision::VAR_BIN,
@@ -1176,11 +1215,12 @@ pub(crate) fn session_agent_config(
             )],
             Needs::HOST_CALL,
         ));
+        sections.insert(Feature::Decision, section);
     }
+
     let placed_env = if kits.is_empty() {
         None
     } else if let Some(shared) = sandboxed.and_then(|s| s.shared()) {
-        let key = crate::shared_kit::runtime_session_key(session_key);
         match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
             Ok(placed) => {
                 if let Some(sandboxed) = sandboxed {
@@ -1193,6 +1233,18 @@ pub(crate) fn session_agent_config(
                 None
             }
         }
+    } else if let Some(remote) = remote {
+        let env = crate::sandbox::remote_kit_env(
+            remote,
+            &key,
+            sections.contains_key(&Feature::Jobs),
+            sections.contains_key(&Feature::Vision),
+            &kits,
+        );
+        if let Some(sandboxed) = sandboxed {
+            sandboxed.mark_remote_session(remote.session_dir(&key));
+        }
+        Some(env)
     } else {
         kits_registry
             .place(&kits, inherited.as_deref())
@@ -1200,29 +1252,44 @@ pub(crate) fn session_agent_config(
     };
     if let Some(env) = placed_env {
         config.shell_env = env;
-        if let Some(wiring) = &jobs_wiring {
-            config.jobs = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&Feature::Jobs) {
+            config.jobs = Some((*section).to_owned());
         }
-        if let Some(wiring) = &vision_wiring {
-            config.vision = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&Feature::Vision) {
+            config.vision = Some((*section).to_owned());
         }
-        if let Some(wiring) = &search_wiring {
-            config.websearch = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&Feature::Search) {
+            config.websearch = Some((*section).to_owned());
         }
-        if let Some(wiring) = &decision_wiring {
-            config.decision = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&Feature::Decision) {
+            config.decision = Some((*section).to_owned());
         }
-        // The env names the sandbox's staging path; the host attaches
-        // from the same directory through its own path.
-        if let Some(vision) = &vision_wiring
+        if sections.contains_key(&Feature::Vision)
             && let Some(tools) = config.tools.as_deref()
         {
-            tools.set_vision_inbox(
-                vision
-                    .shell_env
-                    .get(rhema_bash::vision::VAR_STAGING)
-                    .map(std::path::PathBuf::from),
-            );
+            if let Some(remote) = remote {
+                let sandbox = sandboxed.and_then(|sandboxed| sandboxed.sandbox.clone());
+                if let Some(sandbox) = sandbox {
+                    tools.set_vision_inbox(None);
+                    tools.set_vision_pull(Some(Arc::new(crate::sandbox::SandboxVisionPull {
+                        sandbox,
+                        workspace: sandboxed
+                            .as_ref()
+                            .map(|sandboxed| sandboxed.workspace.clone())
+                            .unwrap_or_default(),
+                        staging: remote.vision_staging(&key),
+                    })));
+                }
+            } else {
+                // The env names the sandbox's staging path; the host
+                // attaches from the same directory through its own path.
+                tools.set_vision_inbox(
+                    config
+                        .shell_env
+                        .get(rhema_bash::vision::VAR_STAGING)
+                        .map(std::path::PathBuf::from),
+                );
+            }
         }
     }
     config.shell_env.extend(mcp.env.clone());

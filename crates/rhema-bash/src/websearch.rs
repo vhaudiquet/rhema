@@ -30,11 +30,11 @@
 //!   shell sees the profile's name, never a key, and `env` in it is
 //!   printable.
 //!
-//! A session whose bash runs elsewhere (a remote sandbox, an executor
-//! behind a wire) wires nothing: its commands cannot exec this
-//! process's binary, and a remote sandbox holds no keychain and no
-//! config file, the same local-only rule the vision, jobs, and MCP
-//! wires apply (`specs/rhema-websearch.md` §0).
+//! A remote sandbox with the installed rhema helper wires the same
+//! function: the init file execs the helper, and the host injects the
+//! profile's resolved chain as [`VAR_CHAIN`]. The sandbox never sees
+//! the keychain or the config file, only the chain the host built. A
+//! sandbox without the helper wires nothing.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

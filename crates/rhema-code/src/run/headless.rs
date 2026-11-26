@@ -219,27 +219,45 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let kits_registry = crate::kits::Registry::new();
     let inherited = std::env::var_os("BASH_ENV");
     let mut kits = Vec::new();
+    let mut sections: std::collections::BTreeMap<rhema_bash::runtime::Feature, &'static str> =
+        std::collections::BTreeMap::new();
     let key = crate::shared_kit::runtime_session_key(&profile);
     let shared_kits = sandboxed
         .as_ref()
         .and_then(|sandboxed| sandboxed.shared())
         .map(|shared| crate::shared_kit::wire(shared, &key, &jobs_tag));
+    let remote = sandboxed.as_ref().and_then(|sandboxed| sandboxed.remote());
     let jobs_ephemeral = sandboxed
         .as_ref()
         .is_some_and(|sandboxed| sandboxed.choice == crate::args::SandboxChoice::Ecrou);
-    let jobs_wiring = if sandboxed.is_some() {
+    let jobs = if sandboxed.is_some() {
         if jobs_ephemeral {
             None
+        } else if let Some(remote) = remote {
+            remote.gob.then(|| {
+                let mut env = std::collections::BTreeMap::new();
+                env.insert(rhema_bash::jobs::VAR_SESSION.to_owned(), jobs_tag.clone());
+                env.insert(
+                    rhema_bash::jobs::VAR_SESSION_FILE.to_owned(),
+                    remote.jobs_session(&key),
+                );
+                (env, rhema_bash::jobs::PROMPT_SECTION)
+            })
         } else {
-            shared_kits.as_ref().and_then(|kits| kits.jobs.clone())
+            shared_kits
+                .as_ref()
+                .and_then(|kits| kits.jobs.clone())
+                .map(|wiring| (wiring.shell_env.clone(), wiring.section))
         }
     } else {
-        rhema_bash::jobs::wire(None, &jobs_tag).cloned()
+        rhema_bash::jobs::wire(None, &jobs_tag)
+            .cloned()
+            .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
-    if let Some(wiring) = &jobs_wiring {
+    if let Some((env, section)) = jobs {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Jobs,
-            wiring.shell_env.clone(),
+            env,
             vec![crate::app::builtin_stub(
                 rhema_bash::jobs::NAME,
                 rhema_bash::jobs::VAR_BIN,
@@ -247,6 +265,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             )],
             rhema_bash::runtime::Needs::MACRO,
         ));
+        sections.insert(rhema_bash::runtime::Feature::Jobs, section);
     }
     // The subscription is the notification feed: the one turn's driver
     // steers from it, so a job that dies mid-run is announced at the
@@ -255,18 +274,33 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     // the daemon's, and a later run sees it only through `job ls`.
     // The host poller reads this host's gob; a sandboxed run's jobs
     // live in the sandbox's, so no finish feed is possible here.
-    let jobs = (sandboxed.is_none() && jobs_wiring.is_some())
-        .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
-        .flatten();
-    let vision_wiring = if sandboxed.is_some() {
-        shared_kits.as_ref().and_then(|kits| kits.vision.clone())
+    let jobs_feed = (sandboxed.is_none()
+        && sections.contains_key(&rhema_bash::runtime::Feature::Jobs))
+    .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
+    .flatten();
+    let vision = if sandboxed.is_some() {
+        if let Some(remote) = remote {
+            let mut env = std::collections::BTreeMap::new();
+            env.insert(
+                rhema_bash::vision::VAR_STAGING.to_owned(),
+                remote.vision_staging(&key),
+            );
+            Some((env, rhema_bash::vision::PROMPT_SECTION))
+        } else {
+            shared_kits
+                .as_ref()
+                .and_then(|kits| kits.vision.clone())
+                .map(|wiring| (wiring.shell_env.clone(), wiring.section))
+        }
     } else {
-        rhema_bash::vision::wire(None).cloned()
+        rhema_bash::vision::wire(None)
+            .cloned()
+            .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
-    if let Some(wiring) = &vision_wiring {
+    if let Some((env, section)) = vision {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Vision,
-            wiring.shell_env.clone(),
+            env,
             vec![crate::app::builtin_stub(
                 rhema_bash::vision::NAME,
                 rhema_bash::vision::VAR_BIN,
@@ -274,18 +308,20 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             )],
             rhema_bash::runtime::Needs::MACRO,
         ));
+        sections.insert(rhema_bash::runtime::Feature::Vision, section);
     }
-    let search_wiring = crate::search_wire::wire_for_session(
+    let search = crate::search_wire::wire_for_session(
         &profile,
         &effective,
         secrets.as_deref(),
         sandboxed.as_ref(),
         None,
-    );
-    if let Some(wiring) = &search_wiring {
+    )
+    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    if let Some((env, section)) = search {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Search,
-            wiring.shell_env.clone(),
+            env,
             vec![crate::app::builtin_stub(
                 rhema_bash::websearch::NAME,
                 rhema_bash::websearch::VAR_BIN,
@@ -293,18 +329,20 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             )],
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
+        sections.insert(rhema_bash::runtime::Feature::Search, section);
     }
-    let decision_wiring = crate::decision_wire::wire_for_session(
+    let decision = crate::decision_wire::wire_for_session(
         &profile,
         &effective,
         secrets.as_deref(),
         sandboxed.as_ref(),
         None,
-    );
-    if let Some(wiring) = &decision_wiring {
+    )
+    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    if let Some((env, section)) = decision {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Decision,
-            wiring.shell_env.clone(),
+            env,
             vec![crate::app::builtin_stub(
                 rhema_bash::decision::NAME,
                 rhema_bash::decision::VAR_BIN,
@@ -312,6 +350,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             )],
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
+        sections.insert(rhema_bash::runtime::Feature::Decision, section);
     }
     let mut mcp = match &sandboxed {
         Some(sandboxed) => sandboxed.mcp().clone(),
@@ -340,6 +379,18 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
                 None
             }
         }
+    } else if let Some(remote) = remote {
+        let env = crate::sandbox::remote_kit_env(
+            remote,
+            &key,
+            sections.contains_key(&rhema_bash::runtime::Feature::Jobs),
+            sections.contains_key(&rhema_bash::runtime::Feature::Vision),
+            &kits,
+        );
+        if let Some(sandboxed) = sandboxed.as_ref() {
+            sandboxed.mark_remote_session(remote.session_dir(&key));
+        }
+        Some(env)
     } else {
         kits_registry
             .place(&kits, inherited.as_deref())
@@ -347,27 +398,44 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     };
     if let Some(env) = placed_env {
         agent_config.shell_env = env;
-        if let Some(wiring) = &jobs_wiring {
-            agent_config.jobs = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&rhema_bash::runtime::Feature::Jobs) {
+            agent_config.jobs = Some((*section).to_owned());
         }
-        if let Some(wiring) = &vision_wiring {
-            agent_config.vision = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&rhema_bash::runtime::Feature::Vision) {
+            agent_config.vision = Some((*section).to_owned());
         }
-        if let Some(wiring) = &search_wiring {
-            agent_config.websearch = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&rhema_bash::runtime::Feature::Search) {
+            agent_config.websearch = Some((*section).to_owned());
         }
-        if let Some(wiring) = &decision_wiring {
-            agent_config.decision = Some(wiring.section.to_owned());
+        if let Some(section) = sections.get(&rhema_bash::runtime::Feature::Decision) {
+            agent_config.decision = Some((*section).to_owned());
         }
-        if let Some(vision) = &vision_wiring
+        if sections.contains_key(&rhema_bash::runtime::Feature::Vision)
             && let Some(tools) = agent_config.tools.as_deref()
         {
-            tools.set_vision_inbox(
-                vision
-                    .shell_env
-                    .get(rhema_bash::vision::VAR_STAGING)
-                    .map(std::path::PathBuf::from),
-            );
+            if let Some(remote) = remote {
+                let sandbox = sandboxed
+                    .as_ref()
+                    .and_then(|sandboxed| sandboxed.sandbox.clone());
+                if let Some(sandbox) = sandbox {
+                    tools.set_vision_inbox(None);
+                    tools.set_vision_pull(Some(Arc::new(crate::sandbox::SandboxVisionPull {
+                        sandbox,
+                        workspace: sandboxed
+                            .as_ref()
+                            .map(|sandboxed| sandboxed.workspace.clone())
+                            .unwrap_or_default(),
+                        staging: remote.vision_staging(&key),
+                    })));
+                }
+            } else {
+                tools.set_vision_inbox(
+                    agent_config
+                        .shell_env
+                        .get(rhema_bash::vision::VAR_STAGING)
+                        .map(std::path::PathBuf::from),
+                );
+            }
         }
     }
     agent_config.shell_env.extend(mcp.env.clone());
@@ -416,7 +484,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let (mut agent_config, _subagents) = rhema_subagents::wire(agent_config);
     // The steering slot takes both feeds: subagent finishes first,
     // then background jobs', one chained source.
-    if let Some(jobs) = &jobs {
+    if let Some(jobs) = &jobs_feed {
         let mut sources: Vec<Arc<dyn rhema_host_agent::Steering>> =
             agent_config.steering.take().into_iter().collect();
         sources.push(jobs.steering());

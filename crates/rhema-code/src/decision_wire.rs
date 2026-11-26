@@ -11,12 +11,13 @@
 //! wiring's env var, pinned at session start, the one per-session
 //! input a standalone exec can carry without session state.
 //!
-//! The session wiring gate is the sandbox wiring rule: a sandboxed session
-//! wires nothing, and a profile naming no decision provider wires
-//! nothing, no function and no prompt section
-//! (`specs/rhema-decision.md` §10). One wiring per session key, held
-//! for the process, because the init file's env map is per-profile and
-//! a profile switch re-runs the assembly: the search wire's shape.
+//! A profile naming no decision provider wires nothing, no function
+//! and no prompt section (`specs/rhema-decision.md` §10). A sandboxed
+//! session wires only when the sandbox has the installed helper and
+//! the profile opts into credential injection; the host supplies the
+//! resolved instance. One wiring per session key, held for the
+//! process, because the init file's env map is per-profile and a
+//! profile switch re-runs the assembly: the search wire's shape.
 
 #![forbid(unsafe_code)]
 
@@ -80,11 +81,11 @@ pub(crate) fn wire_for_session(
     // resolves fresh per invocation, so a provider configured
     // mid-session lands without a restart.
     let (mut instance, key) = rhema_decision_registry::selection(Some(profile), secrets)?;
-    // The injected route needs both the opt-in and a mounted root the
-    // helper was installed under. ssh and http have neither; their
-    // sandbox cache path is v2.
-    let mounted = sandboxed.and_then(|s| s.shared()).is_some();
-    let inject = mounted && profile.sandbox_inject_credentials();
+    // The injected route needs the opt-in and an installed helper.
+    // A mounted sandbox has one under the shared root; a sandbox with
+    // no root has one in its own cache.
+    let inject =
+        sandboxed.is_none_or(|s| s.helper_available()) && profile.sandbox_inject_credentials();
     if sandboxed.is_some() && !inject {
         return None;
     }
@@ -623,6 +624,9 @@ mod sandbox_tests {
             shared: Some(rhema_sandbox::kit::SharedRoot::new(dir.path())),
             mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
             session: Default::default(),
+            sandbox: None,
+            remote: None,
+            remote_session: Default::default(),
         };
         (sandboxed, dir)
     }
@@ -648,6 +652,48 @@ mod sandbox_tests {
             }),
             ..Profile::default()
         }
+    }
+
+    fn remote_sandbox() -> Sandboxed {
+        Sandboxed {
+            choice: SandboxChoice::Ssh,
+            target: "deploy@box".to_owned(),
+            tools: Arc::new(ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+            shared: None,
+            mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
+            session: Default::default(),
+            sandbox: None,
+            remote: Some(rhema_sandbox::kit::SandboxKit {
+                helper: "/home/sandbox/.cache/rhema/kit/3/rhema".into(),
+                helper_dir: "/home/sandbox/.cache/rhema/kit/3".into(),
+                init: "/home/sandbox/.cache/rhema/runtime/init.sh".into(),
+                root: "/home/sandbox/.cache/rhema/runtime".into(),
+                gob: true,
+            }),
+            remote_session: Default::default(),
+        }
+    }
+
+    #[test]
+    fn an_ssh_sandbox_with_the_installed_helper_wires_the_instance() {
+        let sandboxed = remote_sandbox();
+        let wiring = wire_for_session(
+            "sandbox-decision-ssh-inject",
+            &profile(true),
+            None,
+            Some(&sandboxed),
+            None,
+        )
+        .expect("an opted-in ssh session wires");
+        let raw = wiring
+            .shell_env
+            .get(VAR_INSTANCE)
+            .expect("the instance env");
+        assert!(raw.contains("literal-key"), "{raw}");
     }
 
     #[test]

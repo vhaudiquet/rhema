@@ -682,6 +682,9 @@ fn the_assembly_applies_tools_before_and_workspace_after_the_wire_order() {
         shared: None,
         mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: std::sync::Mutex::new(None),
+        sandbox: None,
+        remote: None,
+        remote_session: Default::default(),
     };
     let mut config = HostAgentConfig::new(
         Arc::new(Unused),
@@ -703,4 +706,81 @@ fn the_assembly_applies_tools_before_and_workspace_after_the_wire_order() {
     );
     assembled.apply_workspace(&mut config);
     assert_eq!(config.workspace, Path::new("/workspace"));
+}
+
+#[test]
+fn a_remote_kit_env_names_the_helper_and_the_session_state() {
+    let remote = rhema_sandbox::kit::SandboxKit {
+        helper: "/home/u/.cache/rhema/kit/3/rhema".into(),
+        helper_dir: "/home/u/.cache/rhema/kit/3".into(),
+        init: "/home/u/.cache/rhema/runtime/init.sh".into(),
+        root: "/home/u/.cache/rhema/runtime".into(),
+        gob: true,
+    };
+    let stub = |name: &str, bin: &str, mode: &str| {
+        rhema_bash::runtime::Stub::new(name, bin, vec![mode.to_owned()]).unwrap()
+    };
+    let mut jobs = rhema_bash::runtime::Kit::new(
+        rhema_bash::runtime::Feature::Jobs,
+        vec![stub("job", "RHEMA_JOBS_BIN", "__jobs")],
+        rhema_bash::runtime::Needs::MACRO,
+    );
+    jobs.vars
+        .insert("RHEMA_JOBS_BIN".into(), "/host/bin/rhema".into());
+    jobs.vars.insert("RHEMA_SESSION".into(), "tag".into());
+    let vision = rhema_bash::runtime::Kit::new(
+        rhema_bash::runtime::Feature::Vision,
+        vec![stub("see", "RHEMA_VISION_BIN", "__vision")],
+        rhema_bash::runtime::Needs::MACRO,
+    );
+    let env = remote_kit_env(&remote, "k1", true, true, &[jobs, vision]);
+    assert_eq!(
+        env.get("BASH_ENV").map(String::as_str),
+        Some("/home/u/.cache/rhema/runtime/init.sh")
+    );
+    assert_eq!(
+        env.get("RHEMA_JOBS_BIN").map(String::as_str),
+        Some("/home/u/.cache/rhema/kit/3/rhema")
+    );
+    assert_eq!(
+        env.get("RHEMA_VISION_BIN").map(String::as_str),
+        Some("/home/u/.cache/rhema/kit/3/rhema")
+    );
+    assert_eq!(
+        env.get("RHEMA_JOBS_SESSION").map(String::as_str),
+        Some("/home/u/.cache/rhema/runtime/sessions/k1/jobs/session")
+    );
+    assert_eq!(
+        env.get("RHEMA_VISION_STAGING").map(String::as_str),
+        Some("/home/u/.cache/rhema/runtime/sessions/k1/vision/staging")
+    );
+    assert_eq!(env.get("RHEMA_SESSION").map(String::as_str), Some("tag"));
+}
+
+#[tokio::test]
+async fn a_remote_vision_pull_reads_the_staged_file_and_consumes_it() {
+    let sandbox = Arc::new(ScriptedSandbox::new());
+    let image = b"\x89PNG\r\n\x1a\nrest".to_vec();
+    sandbox
+        .write_file(
+            "/home/u/.cache/rhema/runtime/sessions/k/vision/staging/1.img",
+            &image,
+        )
+        .await
+        .unwrap();
+    sandbox.push_run(Ok(rhema_sandbox::RunOutcome {
+        stdout: b"/home/u/.cache/rhema/runtime/sessions/k/vision/staging/1.img\n".to_vec(),
+        stderr: Vec::new(),
+        code: Some(0),
+    }));
+    let pull = SandboxVisionPull {
+        sandbox: sandbox.clone(),
+        workspace: "/workspace".to_owned(),
+        staging: "/home/u/.cache/rhema/runtime/sessions/k/vision/staging".to_owned(),
+    };
+    let files = rhema_bash::vision::VisionPull::take(&pull).await;
+    assert_eq!(files, vec![image]);
+    let executed = sandbox.executed();
+    assert!(executed[0].starts_with("find "), "{executed:?}");
+    assert!(executed[1].starts_with("rm -f "), "{executed:?}");
 }

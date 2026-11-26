@@ -54,6 +54,10 @@ pub struct ShellTools {
     /// frontend's wiring lights the inbox up through [`Self::with_env`]
     /// alone.
     vision_inbox: RwLock<Option<PathBuf>>,
+    /// The remote half of the same inbox: a sandbox with no shared
+    /// staging directory pulls the staged bytes through its own read
+    /// path after each command.
+    vision_pull: RwLock<Option<Arc<dyn crate::vision::VisionPull>>>,
     /// The approval hook installed for the current turn; `None` rejects
     /// calls.
     pending: Mutex<Option<Arc<dyn Approval>>>,
@@ -129,6 +133,7 @@ impl ShellTools {
             workspace: canonicalized(workspace.into()),
             exec,
             vision_inbox: RwLock::new(None),
+            vision_pull: RwLock::new(None),
             pending: Mutex::new(None),
             env: std::sync::RwLock::new(BTreeMap::new()),
         }
@@ -182,6 +187,30 @@ impl ShellTools {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The builder twin of [`Self::set_vision_pull`].
+    pub fn with_vision_pull(self, pull: Option<Arc<dyn crate::vision::VisionPull>>) -> Self {
+        self.set_vision_pull(pull);
+        self
+    }
+
+    /// The remote staging reader, when one was installed.
+    pub fn vision_pull(&self) -> Option<Arc<dyn crate::vision::VisionPull>> {
+        self.vision_pull
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Sets the remote staging reader for a sandbox with no shared
+    /// directory. Takes precedence over [`Self::vision_inbox`]: the
+    /// sandbox path is not a host path.
+    pub fn set_vision_pull(&self, pull: Option<Arc<dyn crate::vision::VisionPull>>) {
+        *self
+            .vision_pull
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = pull;
     }
 
     /// The working directory every command starts in.
@@ -266,7 +295,15 @@ impl ShellTools {
         {
             Ok(executed) => {
                 let mut result = finished(call.id, executed);
-                if let Some(staging) = self.vision_inbox() {
+                let pull = self
+                    .vision_pull
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let Some(pull) = pull {
+                    let files = pull.take().await;
+                    crate::vision::attach_bytes(files, &mut result);
+                } else if let Some(staging) = self.vision_inbox() {
                     crate::vision::attach(&staging, &mut result);
                 }
                 result

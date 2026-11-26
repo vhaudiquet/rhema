@@ -306,10 +306,9 @@ impl McpStore {
             "MCP_DISABLED".to_owned(),
             self.disabled.iter().cloned().collect::<Vec<_>>().join(","),
         );
-        // No init file runs for ssh and http, and the mounted init
-        // runs only when a session places its kit. Put the install
-        // directory on PATH here, so the model's `mcp` and the
-        // prompt probe resolve the same binary on every backend.
+        // The init file only runs when a session places its kit. Put
+        // the install directory on PATH here, so the model's `mcp` and
+        // the prompt probe resolve the same binary on every backend.
         if let (Some(bin), Some(base)) = (&self.bin_dir, &self.base_path) {
             let path = if base.is_empty() {
                 format!("{bin}:/usr/local/bin:/usr/bin:/bin")

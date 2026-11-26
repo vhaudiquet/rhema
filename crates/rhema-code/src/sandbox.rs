@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rhema_bash::ShellTools;
-use rhema_bash::runtime::KIT_VERSION;
+use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs, Stub};
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_host_agent::HostAgentConfig;
@@ -111,6 +111,123 @@ pub struct Sandboxed {
     /// Dropping it removes the tree; the field keeps it alive as long
     /// as the frontend keeps this assembly.
     pub(crate) session: std::sync::Mutex<Option<rhema_sandbox::kit::SessionDir>>,
+    /// The sandbox the shell executes in, kept for the remote vision
+    /// pull and the remote session cleanup. `None` in tests and for
+    /// assemblies whose tools are not used.
+    pub(crate) sandbox: Option<Arc<dyn Sandbox>>,
+    /// The kit placement for a backend with no shared root: the
+    /// installed helper, the static init, and the state root.
+    pub(crate) remote: Option<rhema_sandbox::kit::SandboxKit>,
+    /// The remote session directory this assembly created, removed on
+    /// drop when a runtime is still up to carry the command.
+    pub(crate) remote_session: std::sync::Mutex<Option<String>>,
+}
+
+impl Drop for Sandboxed {
+    fn drop(&mut self) {
+        let Some(sandbox) = self.sandbox.clone() else {
+            return;
+        };
+        let path = self
+            .remote_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(path) = path {
+            spawn_remote_remove(sandbox, path);
+        }
+    }
+}
+
+/// Removes one remote session tree on the runtime that is still up.
+/// A drop outside a runtime leaves it to the start sweep.
+fn spawn_remote_remove(sandbox: Arc<dyn Sandbox>, path: String) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let _ = rhema_sandbox::kit::remove_sandbox_dir(&*sandbox, &path).await;
+    });
+}
+
+/// The remote vision pull: asks the sandbox for its staged files, reads
+/// them through `read_file`, and removes them. The host never guesses a
+/// host path for a sandbox path.
+pub(crate) struct SandboxVisionPull {
+    /// The sandbox the command ran in.
+    pub sandbox: Arc<dyn Sandbox>,
+    /// The workspace the command runs from, the one directory every
+    /// backend mount exposes.
+    pub workspace: String,
+    /// The staging directory, sandbox path.
+    pub staging: String,
+}
+
+#[async_trait::async_trait]
+impl rhema_bash::vision::VisionPull for SandboxVisionPull {
+    async fn take(&self) -> Vec<Vec<u8>> {
+        let command = format!(
+            "find {} -maxdepth 1 -type f -print 2>/dev/null || true",
+            shell_quote(&self.staging)
+        );
+        let mut progress = OutputOnly(|_| {});
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let Ok(outcome) = self
+            .sandbox
+            .run(
+                rhema_sandbox::RunRequest {
+                    command,
+                    cwd: PathBuf::from(&self.workspace),
+                    timeout: Duration::from_secs(10),
+                    env: std::collections::BTreeMap::new(),
+                },
+                &cancel,
+                &mut progress,
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let listing = String::from_utf8_lossy(&outcome.stdout);
+        let paths: Vec<&str> = listing
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('/'))
+            .collect();
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let mut files = Vec::new();
+        for path in &paths {
+            if let Ok(bytes) = self.sandbox.read_file(path).await {
+                files.push(bytes);
+            }
+        }
+        // Consume unconditionally: a file the read failed on is not
+        // left to fail the next result too.
+        let rm = format!(
+            "rm -f {}",
+            paths
+                .iter()
+                .map(|path| shell_quote(path))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let _ = self
+            .sandbox
+            .run(
+                rhema_sandbox::RunRequest {
+                    command: rm,
+                    cwd: PathBuf::from(&self.workspace),
+                    timeout: Duration::from_secs(10),
+                    env: std::collections::BTreeMap::new(),
+                },
+                &cancel,
+                &mut progress,
+            )
+            .await;
+        files
+    }
 }
 
 /// The backend of a managed instance, the stop argv's program.
@@ -230,7 +347,11 @@ async fn install_helper(sandbox: &dyn Sandbox, shared: &SharedRoot) -> anyhow::R
 /// file the host sends.
 async fn install_mcp_client(sandbox: &dyn Sandbox, workspace: &str) -> anyhow::Result<()> {
     let workspace = workspace.trim_end_matches('/');
-    let probe = format!("test -x \"$HOME/.cache/rhema/kit/{KIT_VERSION}/mcp\"");
+    let probe = format!(
+        "dir=\"$HOME/.cache/rhema/kit/{KIT_VERSION}\"; \
+         test -x \"$dir/rhema\" && test -x \"$dir/mcp\" && \
+         [ \"$(\"$dir/rhema\" __kit-version 2>/dev/null)\" = \"{KIT_VERSION}\" ]"
+    );
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let mut progress = OutputOnly(|_| {});
     if let Ok(outcome) = sandbox
@@ -265,9 +386,11 @@ async fn install_mcp_client(sandbox: &dyn Sandbox, workspace: &str) -> anyhow::R
          script={quoted}\n\
          trap 'rm -f \"$script\"' EXIT\n\
          dir=\"$HOME/.cache/rhema/kit/{KIT_VERSION}\"\n\
-         if [ -x \"$dir/mcp\" ]; then exit 0; fi\n\
+         if [ -x \"$dir/rhema\" ] && [ -x \"$dir/mcp\" ] && \
+            [ \"$(\"$dir/rhema\" __kit-version 2>/dev/null)\" = \"{KIT_VERSION}\" ]; then exit 0; fi\n\
          mkdir -p \"$dir\"\n\
          RHEMA_INSTALL_DIR=\"$dir\" sh \"$script\"\n\
+         test -x \"$dir/rhema\" || {{ echo 'the installer did not place rhema' >&2; exit 1; }}\n\
          test -x \"$dir/mcp\" || {{ echo 'the installer did not place mcp' >&2; exit 1; }}"
     );
     let mut env = std::collections::BTreeMap::new();
@@ -303,6 +426,84 @@ async fn install_mcp_client(sandbox: &dyn Sandbox, workspace: &str) -> anyhow::R
             format!(": {detail}")
         }
     ))
+}
+
+/// The env for a sandbox with no shared root: the kits' vars, then the
+/// installed helper as every stub's binary, then the static init and
+/// the per-session state paths. The helper wins over a wiring's host
+/// binary, the same order `place_shared` applies.
+pub(crate) fn remote_kit_env(
+    remote: &rhema_sandbox::kit::SandboxKit,
+    key: &str,
+    jobs: bool,
+    vision: bool,
+    kits: &[Kit],
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    for kit in kits {
+        env.extend(kit.vars.clone());
+    }
+    for kit in kits {
+        for stub in &kit.stubs {
+            env.insert(stub.bin_var.clone(), remote.helper.clone());
+        }
+    }
+    env.insert(
+        rhema_bash::init::VAR_BASH_ENV.to_owned(),
+        remote.init.clone(),
+    );
+    if jobs {
+        env.insert(
+            rhema_bash::jobs::VAR_SESSION_FILE.to_owned(),
+            remote.jobs_session(key),
+        );
+    }
+    if vision {
+        env.insert(
+            rhema_bash::vision::VAR_STAGING.to_owned(),
+            remote.vision_staging(key),
+        );
+    }
+    env
+}
+
+/// The static stub set every sandbox init carries. The per-session
+/// env decides which features are available; a missing bin var makes
+/// its function say so rather than call nothing.
+fn sandbox_stub_kits() -> Vec<Kit> {
+    let stub = |name: &str, bin: &str, mode: &str| {
+        Stub::new(name, bin, vec![mode.to_owned()]).expect("a built-in kit stub")
+    };
+    vec![
+        Kit::new(
+            Feature::Jobs,
+            vec![stub("job", "RHEMA_JOBS_BIN", rhema_bash::jobs::MODE)],
+            Needs::MACRO,
+        ),
+        Kit::new(
+            Feature::Vision,
+            vec![stub("see", "RHEMA_VISION_BIN", rhema_bash::vision::MODE)],
+            Needs::MACRO,
+        ),
+        Kit::new(
+            Feature::Search,
+            vec![stub(
+                "search",
+                "RHEMA_SEARCH_BIN",
+                rhema_bash::websearch::MODE,
+            )],
+            Needs::HOST_CALL,
+        ),
+        Kit::new(
+            Feature::Decision,
+            vec![stub(
+                "decide",
+                "RHEMA_DECISION_BIN",
+                rhema_bash::decision::MODE,
+            )],
+            Needs::HOST_CALL,
+        ),
+    ]
 }
 
 /// Single-quotes one word for a sandbox shell.
@@ -561,19 +762,42 @@ pub async fn assemble(
     // No shared root, by posture or by a failed helper install: run
     // the same installer into a sandbox-side cache. The MCP store puts
     // that cache on PATH and reads the config through the shell.
-    if shared.is_none() {
+    let remote = if shared.is_none() {
         if choice == SandboxChoice::Ecrou && !profile.sandbox_persist() {
             // A one-command rootfs loses the install before the next
             // probe can see it. Say so instead of paying for it.
             eprintln!(
                 "warning: MCP stays off on a non-persistent ecrou sandbox; enable sandbox.persist"
             );
-        } else if let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await {
-            eprintln!(
-                "warning: the sandbox MCP client did not install, its prompt stays off: {err}"
-            );
+            None
+        } else {
+            match install_mcp_client(&*sandbox, &workspace_string).await {
+                Ok(()) => match rhema_sandbox::kit::place_sandbox(
+                    &*sandbox,
+                    &workspace_string,
+                    &sandbox_stub_kits(),
+                )
+                .await
+                {
+                    Ok(kit) => Some(kit),
+                    Err(err) => {
+                        eprintln!(
+                            "warning: the sandbox kits did not place, their prompt sections stay off: {err}"
+                        );
+                        None
+                    }
+                },
+                Err(err) => {
+                    eprintln!(
+                        "warning: the sandbox helper did not install, the MCP client and kits stay off: {err}"
+                    );
+                    None
+                }
+            }
         }
-    }
+    } else {
+        None
+    };
     // The assembly is done, devices, provision, and seed all landed
     // under the exclusive hold. Downgrade to the session's shared
     // posture; the lock rides `Sandboxed` out to the exit path.
@@ -591,7 +815,7 @@ pub async fn assemble(
     .await;
     let tools = Arc::new(ShellTools::with_executor(
         workspace_string.clone(),
-        Arc::new(ShellSandbox::new(sandbox)),
+        Arc::new(ShellSandbox::new(Arc::clone(&sandbox))),
     ));
     Ok(Sandboxed {
         choice,
@@ -604,6 +828,9 @@ pub async fn assemble(
         shared,
         mcp,
         session: std::sync::Mutex::new(None),
+        sandbox: Some(sandbox),
+        remote,
+        remote_session: std::sync::Mutex::new(None),
     })
 }
 
@@ -617,6 +844,36 @@ impl Sandboxed {
     /// backend mounts one.
     pub(crate) fn shared(&self) -> Option<&SharedRoot> {
         self.shared.as_ref()
+    }
+
+    /// The kit placement for a sandbox with no shared root.
+    pub(crate) fn remote(&self) -> Option<&rhema_sandbox::kit::SandboxKit> {
+        self.remote.as_ref()
+    }
+
+    /// Whether the installed helper can serve search and decide, the
+    /// two kits whose state lives entirely in the env.
+    pub(crate) fn helper_available(&self) -> bool {
+        self.shared.is_some() || self.remote.is_some()
+    }
+
+    /// Records the remote session tree so dropping the assembly removes
+    /// it. Replacing an old path sweeps the old one first.
+    pub(crate) fn mark_remote_session(&self, path: String) {
+        let mut slot = self
+            .remote_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        let old = slot.replace(path);
+        drop(slot);
+        if let Some(old) = old
+            && let Some(sandbox) = self.sandbox.clone()
+        {
+            spawn_remote_remove(sandbox, old);
+        }
     }
 
     /// Keeps the placed session tree alive until this assembly drops.

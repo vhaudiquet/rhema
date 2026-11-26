@@ -214,11 +214,23 @@ async fn run_command(
     command: String,
     what: &str,
 ) -> Result<crate::RunOutcome, KitError> {
+    run_command_in(sandbox, "/", command, what).await
+}
+
+/// [`run_command`] with an explicit cwd. The sandbox placement runs
+/// from the workspace, the one directory every backend mount exposes;
+/// the shared placement can run from the root.
+async fn run_command_in(
+    sandbox: &dyn crate::Sandbox,
+    cwd: &str,
+    command: String,
+    what: &str,
+) -> Result<crate::RunOutcome, KitError> {
     use std::sync::atomic::AtomicBool;
 
     let request = crate::RunRequest {
         command,
-        cwd: "/".into(),
+        cwd: cwd.into(),
         timeout: INSTALL_BUDGET,
         env: BTreeMap::new(),
     };
@@ -461,6 +473,156 @@ pub fn place_shared(shared: &SharedRoot, session: &str, kits: &[Kit]) -> std::io
         skipped: Vec::new(),
         session: SessionDir { path: host_session },
     })
+}
+
+/// A kit placed in a sandbox's own filesystem, for a backend with no
+/// shared root. The init file is static per stub set and lives beside
+/// the installed helper; the per-session state is created by the init
+/// file from the env.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxKit {
+    /// The installed helper, sandbox path.
+    pub helper: String,
+    /// The helper's directory, which `PATH` names so `gob` resolves.
+    pub helper_dir: String,
+    /// The static init file, sandbox path.
+    pub init: String,
+    /// The runtime root, sandbox path: `$HOME/.cache/rhema/runtime`.
+    pub root: String,
+    /// Whether `gob` landed beside the helper.
+    pub gob: bool,
+}
+
+impl SandboxKit {
+    /// The per-session tree for `session`, sandbox path.
+    pub fn session_dir(&self, session: &str) -> String {
+        format!("{}/sessions/{session}", self.root)
+    }
+
+    /// The jobs tag file for `session`.
+    pub fn jobs_session(&self, session: &str) -> String {
+        format!("{}/jobs/session", self.session_dir(session))
+    }
+
+    /// The vision staging directory for `session`.
+    pub fn vision_staging(&self, session: &str) -> String {
+        format!("{}/vision/staging", self.session_dir(session))
+    }
+}
+
+/// Places `kits` in a sandbox with no shared root: verifies the
+/// installed helper, creates the runtime root, and writes one static
+/// init file with every stub. The per-session env names the state; the
+/// init file creates the directories when a command sources it.
+///
+/// # Errors
+///
+/// The helper is absent or reports another kit version, `$HOME` is
+/// unusable, or the init file cannot be written.
+pub async fn place_sandbox(
+    sandbox: &dyn crate::Sandbox,
+    workspace: &str,
+    kits: &[Kit],
+) -> Result<SandboxKit, KitError> {
+    let home = run_command_in(
+        sandbox,
+        workspace,
+        "printf %s \"$HOME\"".to_owned(),
+        "the home probe",
+    )
+    .await?
+    .stdout;
+    let home = String::from_utf8_lossy(&home).trim().to_owned();
+    if !home.starts_with('/') {
+        return Err(KitError::Probe(
+            "the sandbox has no absolute $HOME".to_owned(),
+        ));
+    }
+    let root = format!("{home}/.cache/rhema/runtime");
+    let helper = format!("{home}/.cache/rhema/kit/{KIT_VERSION}/rhema");
+    let helper_dir = Path::new(&helper)
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let version = run_command_in(
+        sandbox,
+        workspace,
+        format!("{} __kit-version", shquote(&helper)),
+        "the helper's version probe",
+    )
+    .await?
+    .stdout;
+    let found = String::from_utf8_lossy(&version).trim().to_owned();
+    if found != KIT_VERSION.to_string() {
+        return Err(KitError::Version {
+            found,
+            wanted: KIT_VERSION,
+        });
+    }
+    let gob = run_command_in(
+        sandbox,
+        workspace,
+        format!("test -x {}", shquote(&format!("{helper_dir}/gob"))),
+        "the gob probe",
+    )
+    .await
+    .is_ok();
+    run_command_in(
+        sandbox,
+        workspace,
+        format!("mkdir -p {}", shquote(&format!("{root}/sessions"))),
+        "the runtime root",
+    )
+    .await?;
+    // Best effort: a crashed host leaves per-session trees behind, and
+    // the next session sweeps the stale ones, one level deep.
+    let _ = run_command_in(
+        sandbox,
+        workspace,
+        format!(
+            "find {} -mindepth 1 -maxdepth 1 -type d -mtime +7 -user \"$(id -u)\" \
+             -exec rm -rf {{}} + 2>/dev/null || true",
+            shquote(&format!("{root}/sessions"))
+        ),
+        "the stale session sweep",
+    )
+    .await;
+    let mut text = format!("export PATH={}:\"$PATH\"\n", shquote(&helper_dir));
+    text.push_str(
+        "if [ -n \"${RHEMA_JOBS_SESSION:-}\" ]; then mkdir -p \"$(dirname \"$RHEMA_JOBS_SESSION\")\" 2>/dev/null || true; fi\n",
+    );
+    text.push_str(
+        "if [ -n \"${RHEMA_VISION_STAGING:-}\" ]; then mkdir -p \"$RHEMA_VISION_STAGING\" 2>/dev/null || true; fi\n",
+    );
+    text.push_str(&rhema_bash::runtime::init_text(kits));
+    let init = format!("{root}/init.sh");
+    sandbox
+        .write_file(&init, text.as_bytes())
+        .await
+        .map_err(|err| KitError::Probe(format!("the init file: {err}")))?;
+    Ok(SandboxKit {
+        helper,
+        helper_dir,
+        init,
+        root,
+        gob,
+    })
+}
+
+/// Removes one sandbox directory, best effort: the drop guard's
+/// remote command, given a path the placer chose.
+///
+/// # Errors
+///
+/// The sandbox cannot run the removal.
+pub async fn remove_sandbox_dir(sandbox: &dyn crate::Sandbox, path: &str) -> Result<(), KitError> {
+    run_command(
+        sandbox,
+        format!("rm -rf {}", shquote(path)),
+        "the session cleanup",
+    )
+    .await
+    .map(|_| ())
 }
 
 /// The session age after which a start sweep removes a tree, the
@@ -713,6 +875,86 @@ mod tests {
         assert!(fresh.exists(), "a fresh session stays");
         assert!(!old_bin.exists(), "a stale version goes");
         assert!(current_bin.exists(), "the running version stays");
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_placement_writes_the_static_init_and_names_the_helper() {
+        use crate::mock::ScriptedSandbox;
+        let sandbox = ScriptedSandbox::new();
+        let version = format!("{KIT_VERSION}\n");
+        for (stdout, code) in [
+            ("/home/sandbox\n", Some(0)),
+            (version.as_str(), Some(0)),
+            ("", Some(0)),
+            ("", Some(0)),
+            ("", Some(0)),
+        ] {
+            sandbox.push_run(Ok(crate::RunOutcome {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                code,
+            }));
+        }
+        let kit = Kit::new(
+            Feature::Jobs,
+            vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
+            Needs::MACRO,
+        );
+        let placed = place_sandbox(&sandbox, "/workspace", std::slice::from_ref(&kit))
+            .await
+            .expect("the sandbox placement lands");
+        assert_eq!(
+            placed.helper,
+            format!("/home/sandbox/.cache/rhema/kit/{KIT_VERSION}/rhema")
+        );
+        assert!(placed.gob);
+        assert_eq!(placed.root, "/home/sandbox/.cache/rhema/runtime");
+        assert_eq!(
+            placed.jobs_session("s1"),
+            "/home/sandbox/.cache/rhema/runtime/sessions/s1/jobs/session"
+        );
+        let files = sandbox.files();
+        let text = String::from_utf8(files.get(&placed.init).cloned().unwrap()).unwrap();
+        assert!(text.contains("job()"), "{text}");
+        assert!(text.contains("RHEMA_JOBS_SESSION"), "{text}");
+        assert!(
+            text.starts_with("export PATH='/home/sandbox/.cache/rhema/kit/"),
+            "{text}"
+        );
+        assert!(
+            sandbox
+                .executed()
+                .iter()
+                .any(|command| command.starts_with("mkdir -p '/home/sandbox/.cache/rhema/runtime")),
+            "{:?}",
+            sandbox.executed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_without_gob_still_places_vision() {
+        use crate::mock::ScriptedSandbox;
+        let sandbox = ScriptedSandbox::new();
+        let version = format!("{KIT_VERSION}\n");
+        for (stdout, code) in [
+            ("/home/sandbox\n", Some(0)),
+            (version.as_str(), Some(0)),
+            ("", Some(1)),
+            ("", Some(0)),
+            ("", Some(0)),
+        ] {
+            sandbox.push_run(Ok(crate::RunOutcome {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                code,
+            }));
+        }
+        let kit = kit(Feature::Vision, Needs::MACRO);
+        let placed = place_sandbox(&sandbox, "/workspace", std::slice::from_ref(&kit))
+            .await
+            .expect("vision places without gob");
+        assert!(!placed.gob);
+        assert!(placed.init.ends_with("/init.sh"));
     }
 
     #[test]

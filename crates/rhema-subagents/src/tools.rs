@@ -209,7 +209,8 @@ impl Inner {
                 // the staging directory; the inbox inherits so the inner
                 // commands' staged images attach to the inner results.
                 .with_shell_env(&parent.shell_env())
-                .with_vision_inbox(parent.vision_inbox()),
+                .with_vision_inbox(parent.vision_inbox())
+                .with_vision_pull(parent.vision_pull()),
         );
         if let Some(hook) = hook {
             shell.install_approval(hook);

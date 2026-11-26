@@ -34,10 +34,11 @@
 //!   them in-process from the profile [`VAR_PROFILE`] names. The
 //!   agent's shell sees the profile's name, never a key.
 //!
-//! A session whose bash runs elsewhere (a remote sandbox, an executor
-//! behind a wire) wires nothing: its commands cannot exec this
-//! process's binary, and a remote sandbox holds no keychain and no
-//! config file, the same local-only rule the other wires apply.
+//! A remote sandbox with the installed rhema helper wires the same
+//! function: the init file execs the helper, and the host injects the
+//! profile's resolved instance. The sandbox never sees the keychain or
+//! the config file, only the instance the host built. A sandbox
+//! without the helper wires nothing.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

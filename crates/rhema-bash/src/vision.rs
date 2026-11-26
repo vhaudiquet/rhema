@@ -27,16 +27,18 @@
 //!
 //! A staged image a command never got to see, the model staged it, it
 //! belongs in the model's context, attaches even when the command
-//! failed or timed out. A session whose bash runs elsewhere (a remote
-//! sandbox, an executor behind a wire) wires nothing: its commands
-//! cannot write where `attach` reads, the same rule the MCP wire
-//! applies for its socket.
+//! failed or timed out. A remote sandbox stages into its own cache; a
+//! frontend that installs a [`VisionPull`] reads those files back over
+//! the sandbox file route after the command, so `attach` never needs a
+//! host path that does not exist.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+use async_trait::async_trait;
 
 use base64::Engine as _;
 use rhema_core::{Image, ImageMediaType, ToolResult};
@@ -59,6 +61,17 @@ pub const VAR_BIN: &str = "RHEMA_VISION_BIN";
 /// The env var holding the staging directory the function writes and
 /// `attach` drains.
 pub const VAR_STAGING: &str = "RHEMA_VISION_STAGING";
+
+/// The host-side half of a sandbox with no shared staging directory:
+/// after a command, the executor's owner drains the staged files
+/// through the sandbox's own read path. The bytes are already consumed
+/// on the far side when this returns.
+#[async_trait]
+pub trait VisionPull: Send + Sync {
+    /// Every staged file, in the order the sandbox listed it, already
+    /// deleted from the sandbox.
+    async fn take(&self) -> Vec<Vec<u8>>;
+}
 
 /// The largest image one staged file may carry: 5 MB, the API-side
 /// per-image ceiling of the Anthropic Messages API, the strictest
@@ -310,16 +323,25 @@ pub(crate) fn attach(staging: &Path, result: &mut ToolResult) {
     };
     let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
     paths.sort();
-    let mut attached: Vec<Image> = Vec::new();
-    let mut dropped: Vec<String> = Vec::new();
+    let mut files = Vec::new();
     for path in paths {
         // Consume unconditionally: a file we cannot read is not left to
         // fail the next result too.
         let bytes = std::fs::read(&path).ok();
         let _ = std::fs::remove_file(&path);
-        let Some(bytes) = bytes else {
-            continue;
-        };
+        if let Some(bytes) = bytes {
+            files.push(bytes);
+        }
+    }
+    attach_bytes(files, result);
+}
+
+/// The same attach over bytes a sandbox pull already read, for a
+/// backend with no shared staging directory.
+pub(crate) fn attach_bytes(files: Vec<Vec<u8>>, result: &mut ToolResult) {
+    let mut attached: Vec<Image> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for bytes in files {
         if bytes.len() > MAX_IMAGE_BYTES {
             dropped.push(format!(
                 "{} bytes over the {} byte limit",

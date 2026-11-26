@@ -15,12 +15,12 @@
 
 ## 0. Scope
 
-Five features reach the model through the same mechanism: a function
+Four features reach the model through the same mechanism: a function
 defined in a `BASH_ENV` init file, exec'ing the rhema binary in a hidden
-mode. They are `job`, `see`, `search`, `decide`, and `mcp` (with one
-stub per server). Today every one of them is host-only.
+mode. They are `job`, `see`, `search`, and `decide`; `mcp` moved to
+its own CLI. Each one is placed wherever the session's bash runs.
 
-**In scope:** one kit description shared by the five; placement into a
+**In scope:** one kit description shared by the four; placement into a
 local temp dir, a backend-shared dir, or a sandbox-side cache;
 the env channel that makes `BASH_ENV` and the bin variable arrive; the
 helper executable's resolution and versioning; the capability matrix
@@ -267,12 +267,12 @@ prompt section is set only for placed kits.
 | backend | shared root | upload | pull | inbound_net | kits in v1 |
 |---|---|---|---|---|
 | local | n/a | n/a | n/a | n/a | all |
-| docker | yes, second bind mount | yes | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
-| lxd container | yes, disk device | yes | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
-| lxd vm | no | yes (seed) | yes | unproven | search/decide (scoped config); jobs/vision pull |
+| docker | yes, second bind mount | yes | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, search/decide, mcp |
+| lxd container | yes, disk device | yes | yes | same as docker | jobs, vision, search/decide, mcp |
+| lxd vm | no | yes (seed) | yes | unproven | jobs/vision/search/decide by pull |
 | ecrou | yes, extra share (virtiofs) | n/a | yes | unproven: MCP on, bind failure leaves it off | vision; jobs stay off (one boot per command) |
 | ssh | no | yes | yes | yes (remote forward) | mcp, search/decide, jobs/vision by pull |
-| http | no | `PUT` (size cap) | yes | no | jobs/vision by pull; search/decide once the helper fits |
+| http | no | `PUT` (size cap) | yes | no | jobs/vision/search/decide by pull |
 
 The table is the decision point: a backend is supported by declaring
 capabilities, not by adding another `if sandboxed`.
@@ -495,19 +495,23 @@ Each phase lands green, and the spec's matrix is updated with what the
 backend actually did, not what the table predicted.
 
 Status: the env channel, the local placement, the docker/lxd/ecrou
-runtime mounts, the in-sandbox installer, and the shared MCP bridge
-are in. Search and decide ride the injected-env route behind
-`sandbox.inject_credentials`. Ecrou now enables the MCP bridge over
-its virtiofs share; the UDS is unproven there, so a failed bind keeps
-MCP off and leaves the other kits running.
+runtime mounts, the in-sandbox installer, the shared MCP bridge, and
+the ssh/http sandbox placement are in. On every backend the kits ride
+`__kit-version` and run the installed helper. SSH and HTTP run the
+installer into `$HOME/.cache/rhema` and read the init file and the
+per-session state from there. Search and decide ride the injected-env
+route behind `sandbox.inject_credentials`. Ecrou now enables the MCP
+bridge over its virtiofs share; the UDS is unproven there, so a failed
+bind keeps MCP off and leaves the other kits running.
 
 Jobs and vision now provision their state under the shared session
 tree and the shell's env names those paths. Vision works on docker,
 lxd, and ecrou. Jobs work on docker and lxd; ecrou boots a machine per
 command, so the gob daemon dies with it. Host-side jobs steering is
 off for sandboxed sessions: the poller reads the host's gob, not the
-sandbox's, so the model polls `job ls`. SSH and HTTP still wait on
-their install path.
+sandbox's, so the model polls `job ls`. SSH and HTTP now run the same
+installer into `$HOME/.cache/rhema`; vision pulls its staged files
+back over the sandbox file route.
 
 ## 12. Decisions
 
