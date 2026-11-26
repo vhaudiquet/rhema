@@ -28,8 +28,12 @@
 //!   attempt instead carries the streamed text back as a trailing
 //!   assistant message, the model writes on from where the link died,
 //!   and the answer the caller finally receives stitches the streamed
-//!   prefix ahead of the continuation's blocks. Nothing durable is ever
-//!   generated twice, so a flaky link costs a pause, not the answer.
+//!   prefix ahead of the continuation's blocks. Extended thinking is
+//!   off for that attempt: the provider wants a thinking block beside
+//!   the prefill and the block's signature cannot be rebuilt from
+//!   deltas, so keeping it on would fail the turn on a 400. Nothing
+//!   durable is ever generated twice, so a flaky link costs a pause,
+//!   not the answer.
 //!   The continuation rides the same ladder, a link too flaky to
 //!   finish still surfaces its error once the ladder runs out, and
 //!   the abandoned attempts' token tallies are lost with them (the
@@ -46,7 +50,9 @@
 //!   that closed the stream before its first chunk, counts as dead like
 //!   any error and retries. If every attempt comes back empty, the
 //!   exchange fails naming that fact, rather than completing a turn
-//!   nobody saw.
+//!   nobody saw. An empty answer that carries a stop reason of its own
+//!   (a content filter, a refusal, the token ceiling) is the provider's
+//!   verdict, not a dead stream: it goes back as it came.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +60,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rhema_core::{
     Content, Event, EventSink, Message, ModelOutput, ModelProvider, ModelRequest, ProviderError,
-    Role,
+    Role, StopReason, request::ThinkingEffort,
 };
 
 /// The waits before each retry of a dead network link: two quick tries
@@ -240,6 +246,13 @@ impl ModelProvider for Retrying {
             // request goes out as it came.
             let mut attempt_req = req.clone();
             if !carried.is_empty() {
+                // A prefill continuation and extended thinking do not
+                // mix: the provider wants the trailing assistant turn to
+                // open with the thinking block that preceded it, and
+                // that block (signature included) cannot be rebuilt from
+                // deltas. The continuation runs without thinking, so the
+                // turn finishes instead of dying on a 400.
+                attempt_req.params.thinking = ThinkingEffort::Default;
                 attempt_req
                     .messages
                     .push(Message::text(Role::Assistant, carried.clone()));
@@ -265,6 +278,19 @@ impl ModelProvider for Retrying {
                     }
                     return Ok(output);
                 }
+                // An empty answer with a stop reason of its own is the
+                // provider's verdict, not a dead stream: a content
+                // filter, a refusal, or the token ceiling all come back
+                // this way. Retrying asks again for the same block and
+                // reports a phantom outage; the answer goes back as is.
+                Ok(output)
+                    if !matches!(
+                        output.stop_reason,
+                        StopReason::EndTurn | StopReason::ToolUse
+                    ) =>
+                {
+                    return Ok(output);
+                }
                 // An empty success carries no error to classify, so it
                 // rides the server ladder: a provider that closes its
                 // own stream early is a server-side oddity, not a dead
@@ -274,7 +300,10 @@ impl ModelProvider for Retrying {
                         sink.emit(Event::RetryWait {
                             error: "the provider closed the stream without content",
                             delay,
-                            attempt: network_spent + server_spent + 1,
+                            // Attempts count within the ladder that
+                            // governs them, so the number never runs
+                            // past its total.
+                            attempt: server_spent + 1,
                             total: self.server_ladder.len() as u32 + 1,
                         });
                         self.sleeper.sleep(delay).await;
@@ -333,7 +362,9 @@ impl ModelProvider for Retrying {
                     sink.emit(Event::RetryWait {
                         error: &message,
                         delay,
-                        attempt: network_spent + server_spent + 1,
+                        // This ladder's own attempts, not both ladders
+                        // added up: the count never exceeds its total.
+                        attempt: spent + 1,
                         total: ladder.len() as u32 + 1,
                     });
                     self.sleeper.sleep(delay).await;
@@ -985,5 +1016,191 @@ mod tests {
         // without counting as content, or the retry never would have
         // run.
         assert_eq!(scripted.calls(), 2);
+    }
+}
+
+#[cfg(test)]
+mod verdict_and_continuation_tests {
+    use super::*;
+    use rhema_core::Usage;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One scripted attempt per call, in order.
+    enum Attempt {
+        /// A timeout before any byte.
+        Timeout,
+        /// A dead link before any byte.
+        Network,
+        /// One text delta, then a timeout mid-stream.
+        DeltaThenTimeout,
+        /// A provider verdict with no content: a content filter.
+        Blocked,
+        /// A complete answer.
+        Answer(&'static str),
+    }
+
+    struct Scripted {
+        steps: Mutex<Vec<Attempt>>,
+        calls: AtomicUsize,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl Scripted {
+        fn new(steps: Vec<Attempt>) -> Self {
+            Self {
+                steps: Mutex::new(steps),
+                calls: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for Scripted {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(req);
+            match self.steps.lock().unwrap().remove(0) {
+                Attempt::Timeout => Err(ProviderError::Timeout),
+                Attempt::Network => Err(ProviderError::Network("dead link".into())),
+                Attempt::DeltaThenTimeout => {
+                    sink.emit(Event::TextDelta("partial "));
+                    Err(ProviderError::Timeout)
+                }
+                Attempt::Blocked => Ok(ModelOutput {
+                    message: Message {
+                        annotations: Default::default(),
+                        role: Role::Assistant,
+                        content: Vec::new(),
+                    },
+                    stop_reason: StopReason::Other("SAFETY".into()),
+                    usage: Usage::default(),
+                }),
+                Attempt::Answer(text) => Ok(ModelOutput {
+                    message: Message::text(Role::Assistant, text),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                }),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Watched {
+        waits: Vec<(u32, u32)>,
+    }
+
+    impl EventSink for Watched {
+        fn emit(&mut self, event: Event<'_>) {
+            if let Event::RetryWait { attempt, total, .. } = event {
+                self.waits.push((attempt, total));
+            }
+        }
+    }
+
+    fn retried(scripted: Arc<Scripted>) -> Retrying {
+        Retrying::with_ladders(
+            scripted,
+            vec![Duration::from_millis(1), Duration::from_millis(1)],
+            vec![Duration::from_millis(1), Duration::from_millis(1)],
+        )
+    }
+
+    fn request() -> ModelRequest {
+        ModelRequest {
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            params: rhema_core::ChatParams::default(),
+        }
+    }
+
+    /// A content filter comes back as an empty message with a stop
+    /// reason of its own. Retrying it spends the whole ladder to get
+    /// the same block and then reports a phantom outage.
+    #[tokio::test]
+    async fn an_empty_verdict_is_not_retried() {
+        let scripted = Arc::new(Scripted::new(vec![Attempt::Blocked]));
+        let mut sink = Watched::default();
+
+        let out = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await
+            .expect("the verdict is an answer");
+
+        assert_eq!(scripted.calls.load(Ordering::SeqCst), 1, "no retry spent");
+        assert_eq!(out.stop_reason, StopReason::Other("SAFETY".into()));
+        assert!(out.message.content.is_empty());
+        assert!(sink.waits.is_empty());
+    }
+
+    /// A mid-stream cut after visible text continues from the anchor,
+    /// and the continuation drops thinking: the prefill cannot carry
+    /// the thinking block the provider requires beside it.
+    #[tokio::test]
+    async fn a_continuation_turns_thinking_off() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::DeltaThenTimeout,
+            Attempt::Answer("on"),
+        ]));
+        let mut req = request();
+        req.params.thinking = ThinkingEffort::High;
+        let mut sink = Watched::default();
+
+        retried(scripted.clone())
+            .complete(req, &mut sink)
+            .await
+            .expect("the continuation answers");
+
+        let requests = scripted.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].params.thinking, ThinkingEffort::High);
+        assert_eq!(
+            requests[1].params.thinking,
+            ThinkingEffort::Default,
+            "the prefill continuation runs without thinking"
+        );
+        assert_eq!(
+            requests[1].messages.last().map(|message| message.role),
+            Some(Role::Assistant),
+            "the anchor rides the request"
+        );
+    }
+
+    /// Each retry announcement counts its own ladder's attempts, so the
+    /// number never runs past its total when both ladders are in play.
+    #[tokio::test]
+    async fn a_retry_announcement_never_exceeds_its_total() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::Timeout,
+            Attempt::Network,
+            Attempt::Timeout,
+            Attempt::Network,
+            Attempt::Answer("done"),
+        ]));
+        let mut sink = Watched::default();
+
+        retried(scripted)
+            .complete(request(), &mut sink)
+            .await
+            .expect("the last attempt answers");
+
+        assert_eq!(sink.waits.len(), 4, "{:?}", sink.waits);
+        for (attempt, total) in &sink.waits {
+            assert!(attempt <= total, "{attempt} of {total}");
+        }
+        assert_eq!(
+            sink.waits
+                .iter()
+                .map(|(attempt, _)| *attempt)
+                .collect::<Vec<_>>(),
+            [1, 1, 2, 2],
+            "each ladder counts its own attempts"
+        );
     }
 }
