@@ -1,6 +1,6 @@
 # API notes for 0.5.0
 
-Findings from the 0.4.0 review batch. Items 1-4 landed on main after the tag; the signatures opened, and these notes keep the outcome on record. Items 5-6 remain open, still breaking, still waiting for the 0.5.0 window. A version bump has not been made yet: the workspace says 0.4.1, and the landed batch is the first half of the breaking work.
+Findings from the 0.4.0 review batch. Items 1-4, 7, and 8 landed on main after the tag; the signatures opened, and these notes keep the outcome on record. Item 5 is deferred past 0.5.0, for the reason in its section. Item 6 is mostly moot, as its heading says. 0.5.0 carries the breaking work that landed.
 
 ## 1. One shape for "run a command" (landed)
 
@@ -26,11 +26,11 @@ Landed as: `SandboxError::OutOfMemory` and `ShellError::OutOfMemory`, so a SIGKI
 
 `MAX_STREAM_BYTES`/`MAX_CAPTURE_BYTES`/`MAX_LINE_BYTES` are now `EXEC_TAIL_BYTES`, `EXEC_CAPTURE_BYTES`, `EXEC_LINE_BYTES`. One correction to the original plan: the single definition of the line cap lives in rhema-bash (its pump uses it, and rhema-sandbox depends on rhema-bash, not the other way), with `exec_util` re-exporting it; the other two are exec_util's own. rhema-mcp's `MAX_LINE_BYTES` (4 MiB, MCP framing) is untouched; it caps a different layer.
 
-## 5. `NONINTERACTIVE_ENV` re-export chain (open)
+## 5. `NONINTERACTIVE_ENV` re-export chain (deferred)
 
-rhema-sandbox's exec_util re-exports `NONINTERACTIVE_ENV`/`setsid_executable` from rhema-bash (exec_util.rs:65). The three backends (local/ssh/docker) import them across crates, so either name breaking hits all.
+rhema-sandbox's exec_util re-exports `NONINTERACTIVE_ENV`, `OSC7577_TOKEN`, and `setsid_executable` from rhema-bash (`exec_util.rs:27`). rhema-sandbox-local is the only consumer, at `lib.rs:105`, `:120`, and `:125`; the docker and ssh backends do not touch the names.
 
-Fix at 0.5.0: hoist both to rhema-core (or a shared rhema-process crate) and re-export from there; `exec_util` keeps no second public path.
+Deferred past 0.5.0. The re-export is the spawn family's single import point, the way `EXEC_LINE_BYTES` reaches the backends (section 4), and rhema-sandbox already depends on rhema-bash with `default-features = false`, so nothing is gained by moving the definitions. rhema-core is not a home for them: it holds the agent loop and the provider contract and compiles into wasm hosts, while these three names describe how a child process is launched. If the bash tool must leave the backends' import lines, the alternative is a small process crate below both, not core.
 
 ## 6. Tougher closure bounds (open, mostly moot)
 
