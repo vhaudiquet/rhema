@@ -31,6 +31,7 @@ CRATES=(
   rhema-session-store-sqlite
   rhema-submissions
   rhema-provider
+  rhema-model-catalog
   rhema-prompt
   rhema-bash
   rhema-sandbox
@@ -42,11 +43,9 @@ CRATES=(
   rhema-sandbox-ecrou
   rhema-transcript
   rhema-host-agent
-  rhema-mcp
   rhema-rsd
   rhema-memory
   rhema-identity
-  rhema-autonomous-agent
   rhema-cloud-agent
   rhema-provider-anthropic
   rhema-provider-chatgpt
@@ -60,11 +59,13 @@ CRATES=(
   rhema-provider-registry
   rhema-acp
   rhema-websearch
+  rhema-websearch-opencode
   rhema-websearch-brave
   rhema-websearch-tavily
   rhema-websearch-exa
   rhema-websearch-registry
   rhema-decision
+  rhema-decision-opencode
   rhema-decision-jev
   rhema-decision-clef
   rhema-decision-openrouter
