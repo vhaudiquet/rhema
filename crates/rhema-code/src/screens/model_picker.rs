@@ -137,7 +137,7 @@ pub struct ModelPicker {
     hidden: HashSet<usize>,
     /// Days since 1970-01-01 the age rule measures against.
     today: i32,
-    /// Whether [`Self::hidden`] is ignored: the `ctrl-a` toggle.
+    /// Whether `hidden` is ignored: the `ctrl-a` toggle.
     pub show_all: bool,
     /// The profile's stored model, offered when [`Self::models`] is
     /// empty and hidden as soon as the catalog names anything.

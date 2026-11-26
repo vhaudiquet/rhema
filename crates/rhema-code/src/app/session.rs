@@ -219,7 +219,7 @@ impl App {
     /// The screen opens at once and the listing runs off the UI thread:
     /// it reads and parses every saved session for its opening prompt,
     /// and the paint must not wait for that. The rows land as
-    /// [`UiEvent::SessionsListed`] for [`Self::land_sessions_listed`].
+    /// [`UiEvent::SessionsListed`] for `land_sessions_listed`.
     pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
         self.resume_base = Some(base.to_path_buf());
         self.start_resume_listing(base, false)

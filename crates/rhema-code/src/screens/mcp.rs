@@ -27,7 +27,7 @@ pub struct McpServerRow {
 
 /// The sandbox's MCP entries as rendered rows, in name order,
 /// each tagged muted from `disabled`. Validation runs through
-/// [`crate::mcp::McpConfig::from_entries`], the same fold the
+/// `McpConfig::from_entries`, the same fold the
 /// assembly runs, so a row the manager would keep is clean and a row
 /// it would skip carries the notice that says why.
 pub fn mcp_server_rows(

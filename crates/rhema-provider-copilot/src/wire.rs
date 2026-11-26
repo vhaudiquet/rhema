@@ -10,7 +10,7 @@
 //! tool-call fragment assembly, the `[DONE]` sentinel, is the shared
 //! dialect's behavior, documented there. The newer models the proxy
 //! serves only on `POST {api}/responses` speak that crate's Responses
-//! wire too; [`model_route`] reads the models page's
+//! wire too; `model_route` reads the models page's
 //! `supported_endpoints` to route them.
 //!
 //! What remains here is the seat side: `GET {api}/copilot_internal/user`,
