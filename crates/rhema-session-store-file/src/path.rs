@@ -99,6 +99,28 @@ mod tests {
         }
     }
 
+    /// A directory the save did not create keeps its mode: `--save
+    /// ~/notes/x.json` must not hide the user's own directory.
+    #[test]
+    #[cfg(unix)]
+    fn an_existing_parent_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = notes.join("session.json");
+
+        PathStore::new(&path)
+            .save(&session_with("into notes"))
+            .unwrap();
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&notes), 0o755, "the user's directory stays theirs");
+        assert_eq!(mode(&path), 0o600, "the file itself is private");
+    }
+
     #[test]
     fn a_save_leaves_no_temp_behind() {
         let dir = tempfile::tempdir().unwrap();

@@ -26,10 +26,20 @@ pub(crate) fn write_atomic(path: &Path, tag: &str, session: &Session) -> Result<
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    rhema_config::privacy::private_dir(dir).map_err(|source| StoreError::Io {
+    // A directory this save creates is ours to tighten to 0700. An
+    // existing one is the caller's: `--save ~/notes/x.json` names a
+    // directory the user made, and hiding their own files from their
+    // group is not this store's call. The temp and the target land 0600
+    // either way, which is what the content needs.
+    let io_error = |source| StoreError::Io {
         path: dir.to_path_buf(),
         source,
-    })?;
+    };
+    if dir.exists() {
+        fs::create_dir_all(dir).map_err(io_error)?;
+    } else {
+        rhema_config::privacy::private_dir(dir).map_err(io_error)?;
+    }
 
     let (temp, mut file) = create_temp(dir, tag)?;
     if let Err(err) = write_stream(&mut file, session, &temp) {
