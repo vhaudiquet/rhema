@@ -15,6 +15,8 @@ pub struct ResumeRow {
     /// The session's opening prompt, cut for the row; `None` when the
     /// file could not be read for a preview.
     pub snippet: Option<String>,
+    /// The saved file's byte length, shown on the metadata line.
+    pub bytes: u64,
 }
 
 /// What one resume-picker keypress means.
@@ -37,6 +39,9 @@ pub struct ResumeScreen {
     pub entries: Vec<ResumeRow>,
     /// Index of the highlighted row.
     pub selected: usize,
+    /// True while the listing runs off-thread: the screen paints
+    /// before the session files are read, and an Enter waits.
+    pub loading: bool,
 }
 
 impl ResumeScreen {
@@ -49,11 +54,22 @@ impl ResumeScreen {
                 path: saved.path,
                 age: crate::sessions::ago(saved.saved_at, now),
                 snippet: saved.snippet,
+                bytes: saved.bytes,
             })
             .collect();
         Self {
             entries,
             selected: 0,
+            loading: false,
+        }
+    }
+
+    /// The screen before its listing lands: no rows, no pick.
+    pub fn loading() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            loading: true,
         }
     }
 
@@ -79,8 +95,12 @@ impl ResumeScreen {
         }
     }
 
-    /// Enter: load the highlighted session.
+    /// Enter: load the highlighted session. A listing still running
+    /// has nothing to load yet.
     fn pick(&mut self) -> ResumeAction {
+        if self.loading {
+            return ResumeAction::None;
+        }
         match self.entries.get(self.selected) {
             Some(row) => ResumeAction::Pick(row.path.clone()),
             None => ResumeAction::None,

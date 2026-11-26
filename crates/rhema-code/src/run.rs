@@ -43,8 +43,8 @@ use crate::sessions;
 use crate::status::{self, Status, Tracker, first_line};
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{
-    spawn_clipboard_grab, spawn_model_fetch, spawn_session_resume, spawn_turn, spawn_update_check,
-    spawn_update_install, spawn_usage_fetch,
+    spawn_clipboard_grab, spawn_model_fetch, spawn_session_listing, spawn_session_resume,
+    spawn_turn, spawn_update_check, spawn_update_install, spawn_usage_fetch,
 };
 use crate::{events::UiEvent, ui};
 
@@ -1070,6 +1070,13 @@ fn dispatch(
         }
         Effect::ResumeSession(path) => {
             spawn_session_resume(path, tx.clone());
+        }
+        Effect::ListSessions {
+            base,
+            workspace,
+            request,
+        } => {
+            spawn_session_listing(base, workspace, request, tx.clone());
         }
         Effect::CheckForUpdates => {
             spawn_update_check(tx.clone());

@@ -850,6 +850,18 @@ pub enum Effect {
     /// Load this saved session off-thread for `/resume`; the parts
     /// land as `UiEvent::SessionResumed` and the app applies them.
     ResumeSession(PathBuf),
+    /// List this workspace's saved sessions off-thread; every file is
+    /// read and parsed for its opening prompt, and the picker must
+    /// paint before that runs. Lands as `UiEvent::SessionsListed`.
+    ListSessions {
+        /// The session cache root.
+        base: PathBuf,
+        /// The workspace whose sessions list.
+        workspace: PathBuf,
+        /// The request the listing answers, so a listing a newer open
+        /// superseded lands stale and drops.
+        request: u64,
+    },
     /// Open this `SUBAGENT.md` in `$EDITOR`: the runner suspends the
     /// TUI around the blocking editor and re-enters after, and the
     /// Subagents page's rows refresh then, the edit happened behind

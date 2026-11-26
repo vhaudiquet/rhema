@@ -255,6 +255,12 @@ pub struct App {
     /// a second pick superseded it mid-load. Cleared when its load
     /// lands, whatever the landing then finds.
     pub resume_pending: Option<std::path::PathBuf>,
+    /// The `/resume` listing in flight: its request id. A listing for
+    /// any other id is stale; the screen was opened again since.
+    pub resume_listing: Option<u64>,
+    /// The last listing id handed out, so a reopening screen never
+    /// mistakes an older listing for its own.
+    resume_list_seq: u64,
     /// A rebuild a running turn's checkout ate, with the stamp it
     /// asked for: mid-turn settings toggles promised their rebuild
     /// for the turn's end, and only the turn's finish runs it — the
@@ -716,6 +722,8 @@ impl App {
             assembling: None,
             deferred_rebuild: None,
             resume_pending: None,
+            resume_listing: None,
+            resume_list_seq: 0,
             update: crate::screens::UpdatePage::default(),
             logo_rect: None,
             bubble_pieces: Vec::new(),

@@ -30,6 +30,10 @@ impl App {
                 }
                 Vec::new()
             }
+            UiEvent::SessionsListed { request, result } => {
+                self.land_sessions_listed(request, result);
+                Vec::new()
+            }
             UiEvent::SessionResumed { path, result } => {
                 self.land_resume(&path, result);
                 Vec::new()

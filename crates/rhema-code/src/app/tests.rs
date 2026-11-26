@@ -5504,16 +5504,29 @@ fn slash_resume_opens_a_picker_and_picking_resumes() {
     h.app.transcript.push_user("current talk", Vec::new());
 
     // The picker over the temp base; the dispatch path resolves its
-    // own base from the environment, which a test cannot own.
-    h.app.open_resume_from(base.path());
+    // own base from the environment, which a test cannot own. The
+    // screen paints before the listing runs, so no pick lands yet.
+    let listing = h.app.open_resume_from(base.path());
     match &h.app.screen {
         Screen::Resume(resume) => {
+            assert!(resume.loading, "the screen paints before the listing");
+            assert!(resume.entries.is_empty());
+        }
+        _other => panic!("expected the resume picker"),
+    }
+    let waiting = h.app.on_key(key(KeyCode::Enter));
+    assert!(waiting.is_empty(), "enter waits for the listing");
+    deliver_listing(&mut h, listing);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(!resume.loading);
             assert_eq!(resume.entries.len(), 2);
             assert_eq!(resume.entries[0].path, newer, "newest first");
             assert_eq!(
                 resume.entries[0].snippet.as_deref(),
                 Some("the newer prompt")
             );
+            assert!(resume.entries[0].bytes > 0, "the row carries its size");
         }
         _other => panic!("expected the resume picker"),
     }
@@ -5594,10 +5607,59 @@ fn clear_drops_the_session_file_so_the_next_conversation_owns_its_own() {
 }
 
 #[test]
+fn a_superseded_session_listing_lands_stale_and_drops() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let base = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(&h.app.options.workspace).unwrap();
+    crate::sessions::save_session(base.path(), &workspace, &session_of("one prompt")).unwrap();
+
+    // Two opens: the second request owns the screen.
+    let first = h.app.open_resume_from(base.path());
+    let second = h.app.open_resume_from(base.path());
+    deliver_listing(&mut h, first);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(
+                resume.loading,
+                "the older listing does not fill the newer screen"
+            );
+            assert!(resume.entries.is_empty());
+        }
+        _other => panic!("expected the resume picker"),
+    }
+    deliver_listing(&mut h, second);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(!resume.loading);
+            assert_eq!(resume.entries.len(), 1);
+        }
+        _other => panic!("expected the resume picker"),
+    }
+}
+
+#[test]
+fn leaving_the_picker_while_it_lists_drops_the_landing() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let base = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(&h.app.options.workspace).unwrap();
+    crate::sessions::save_session(base.path(), &workspace, &session_of("a prompt")).unwrap();
+
+    let listing = h.app.open_resume_from(base.path());
+    h.app.on_key(key(KeyCode::Esc));
+    assert!(matches!(h.app.screen, Screen::Chat));
+    deliver_listing(&mut h, listing);
+    assert!(
+        matches!(h.app.screen, Screen::Chat),
+        "a landing after the back press does not reopen the picker"
+    );
+}
+
+#[test]
 fn slash_resume_with_nothing_saved_is_a_notice() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let base = tempfile::tempdir().unwrap();
-    h.app.open_resume_from(base.path());
+    let listing = h.app.open_resume_from(base.path());
+    deliver_listing(&mut h, listing);
     assert!(matches!(h.app.screen, Screen::Chat), "no picker opens");
     assert!(matches!(
         h.app.transcript.lines().last(),
@@ -5609,6 +5671,26 @@ fn session_of(prompt: &str) -> Session {
     let mut session = Session::default();
     session.history.push(Message::text(Role::User, prompt));
     session
+}
+
+/// Runs the `/resume` listing effect the way the runner would, then
+/// hands its answer to the app.
+fn deliver_listing(h: &mut Harness, effects: Vec<Effect>) {
+    let [
+        Effect::ListSessions {
+            base,
+            workspace,
+            request,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected the listing effect: {effects:?}");
+    };
+    let result = crate::sessions::list_sessions(base, workspace).map_err(|err| err.to_string());
+    h.app.on_event(UiEvent::SessionsListed {
+        request: *request,
+        result,
+    });
 }
 
 #[test]

@@ -576,7 +576,7 @@ pub(crate) fn render_picker(
 /// A line cut to `width` display cells, an ellipsis taking the last
 /// cell. Styles survive the cut; a line that already fits passes
 /// through.
-fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
+pub(crate) fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
     let total: usize = line.spans.iter().map(|span| span.content.width()).sum();
     if total <= width || width == 0 {
         return line;

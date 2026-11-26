@@ -213,15 +213,47 @@ impl App {
 
     /// [`App::open_resume`] against an explicit base, so tests drive real
     /// directories instead of the environment.
+    ///
+    /// The screen opens at once and the listing runs off the UI thread:
+    /// it reads and parses every saved session for its opening prompt,
+    /// and the paint must not wait for that. The rows land as
+    /// [`UiEvent::SessionsListed`] for [`Self::land_sessions_listed`].
     pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
         if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /resume waits for it to finish");
             return Vec::new();
         }
-        let workspace = crate::args::canonical(&self.options.workspace);
-        match crate::sessions::list_sessions(base, &workspace) {
+        self.resume_list_seq = self.resume_list_seq.wrapping_add(1);
+        let request = self.resume_list_seq;
+        self.resume_listing = Some(request);
+        self.screen = Screen::Resume(crate::screens::ResumeScreen::loading());
+        vec![Effect::ListSessions {
+            base: base.to_path_buf(),
+            workspace: crate::args::canonical(&self.options.workspace),
+            request,
+        }]
+    }
+
+    /// A `/resume` listing landed from the blocking pool. Only the
+    /// newest request applies, and only while its picker is still the
+    /// screen: a listing superseded by a second open, or one whose
+    /// screen the user already left, drops.
+    pub(crate) fn land_sessions_listed(
+        &mut self,
+        request: u64,
+        result: Result<Vec<crate::sessions::SavedSession>, String>,
+    ) {
+        if self.resume_listing != Some(request) {
+            return;
+        }
+        self.resume_listing = None;
+        if !matches!(self.screen, Screen::Resume(_)) {
+            return;
+        }
+        match result {
             Ok(entries) if entries.is_empty() => {
+                self.screen = Screen::Chat;
                 self.transcript
                     .push_notice("no saved sessions for this directory");
             }
@@ -231,9 +263,11 @@ impl App {
                     crate::sessions::now_millis(),
                 ));
             }
-            Err(err) => self.error = Some(format!("cannot list saved sessions: {err}")),
+            Err(err) => {
+                self.screen = Screen::Chat;
+                self.error = Some(format!("cannot list saved sessions: {err}"));
+            }
         }
-        Vec::new()
     }
 
     /// The `/resume` pick: refuses politely under a running turn, and

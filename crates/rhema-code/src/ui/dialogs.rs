@@ -513,46 +513,72 @@ pub(crate) fn render_resume_picker(
     theme: &Theme,
 ) {
     let area = frame.area();
-    let block = super::chrome::panel(Some("resume a session"), theme);
+    let block = super::chrome::panel(Some("Resume a session"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let [list_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
 
-    let rows: Vec<ListItem> = screen
-        .entries
-        .iter()
-        .map(|row| {
-            let snippet = row
-                .snippet
-                .clone()
-                .unwrap_or_else(|| "(no preview)".to_owned());
-            ListItem::new(Line::from(vec![
-                Span::styled(snippet, Style::default().fg(theme.text)),
-                Span::styled(
-                    format!("  ·  {}", row.age),
-                    Style::default().fg(theme.text3),
-                ),
-            ]))
-        })
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(screen.selected));
-    frame.render_stateful_widget(
-        List::new(rows)
-            .highlight_symbol("❯ ")
-            .highlight_style(Style::default().bg(theme.elevated)),
-        inner,
-        &mut state,
-    );
+    // Each session takes two rows: the prompt, then its age and size.
+    // The list's own air, its padding and the marker column, sits
+    // left and right of the text, so a summary is cut to what is
+    // actually left. The padding doubles across and adds a row at
+    // the top and bottom, so the data never touches the frame.
+    let list_block = Block::default().padding(Padding::proportional(1));
+    let text_width = list_area.width.saturating_sub(2 * 2 + 2) as usize;
+
+    if screen.loading {
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                Span::raw("looking for saved sessions…").fg(theme.text3),
+            ))
+            .block(list_block),
+            list_area,
+        );
+    } else if screen.entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::raw("no saved sessions").fg(theme.text3)))
+                .block(list_block),
+            list_area,
+        );
+    } else {
+        let rows: Vec<ListItem> = screen
+            .entries
+            .iter()
+            .map(|row| {
+                let (summary, summary_style) = match &row.snippet {
+                    Some(snippet) => (snippet.clone(), Style::default().fg(theme.text)),
+                    None => ("(no preview)".to_owned(), Style::default().fg(theme.text3)),
+                };
+                let summary = super::model_picker::truncate_line(
+                    Line::from(Span::styled(summary, summary_style)),
+                    text_width,
+                );
+                let meta = format!("{} · {}", row.age, crate::sessions::size_label(row.bytes));
+                let meta = super::model_picker::truncate_line(
+                    Line::from(Span::styled(meta, Style::default().fg(theme.text3))),
+                    text_width,
+                );
+                ListItem::new(vec![summary, meta])
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(screen.selected));
+        frame.render_stateful_widget(
+            List::new(rows)
+                .block(list_block)
+                .highlight_symbol("❯ ")
+                .highlight_style(Style::default().bg(theme.elevated))
+                .style(Style::default().fg(theme.text)),
+            list_area,
+            &mut state,
+        );
+    }
 
     let footer = Line::from(Span::raw("enter resume · esc back").fg(theme.text3));
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
-        Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
-            height: 1,
-        },
+        footer_area,
     );
 }
 

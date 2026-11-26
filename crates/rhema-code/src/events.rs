@@ -303,6 +303,18 @@ pub enum UiEvent {
         /// its failure cases carry.
         grab: crate::screens::clipboard::Grab,
     },
+    /// A `/resume` listing finished off-thread. Reading and parsing
+    /// every saved session for its opening prompt can run past a
+    /// hundred megabytes, so the picker paints first and fills when
+    /// this lands.
+    SessionsListed {
+        /// The open request this answers; a listing a newer open
+        /// superseded is stale and drops.
+        request: u64,
+        /// The rows for this workspace, newest first, or why the
+        /// listing failed.
+        result: Result<Vec<crate::sessions::SavedSession>, String>,
+    },
     /// A `/resume` pick finished loading off-thread. The session file
     /// is a JSON read plus a parse, and the usage accounting it derives
     /// is more of the same, neither belongs on the UI thread, which

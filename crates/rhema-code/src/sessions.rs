@@ -28,6 +28,8 @@ pub struct SavedSession {
     /// The session's opening prompt, cut for a picker row; `None` when
     /// the file predates a prompt or could not be read.
     pub snippet: Option<String>,
+    /// The saved file's byte length, the picker's size hint.
+    pub bytes: u64,
 }
 
 /// The saved-session base: `$XDG_CACHE_HOME/rhema/sessions`, or under
@@ -159,6 +161,7 @@ pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSessi
             path: store.path_for(&meta.id),
             saved_at: meta.saved_at,
             snippet: meta.opening_prompt,
+            bytes: meta.bytes,
         })
         .collect())
 }
@@ -185,6 +188,21 @@ pub fn ago(saved_at: u64, now: u64) -> String {
         60..=3599 => format!("{}m ago", secs / 60),
         3600..=86_399 => format!("{}h ago", secs / 3_600),
         _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+/// A file size as the picker's metadata line shows it: whole bytes
+/// under a kilobyte, whole kilobytes under a megabyte, one decimal
+/// above, so a row reads as a length and not as a byte count.
+pub fn size_label(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
     }
 }
 
@@ -349,6 +367,17 @@ mod tests {
         );
         session.usage_stats = serde_json::json!("three requests");
         assert_eq!(UsageStats::from_session(&session), None);
+    }
+
+    #[test]
+    fn sizes_read_in_buckets() {
+        assert_eq!(size_label(0), "0 B");
+        assert_eq!(size_label(512), "512 B");
+        assert_eq!(size_label(1023), "1023 B");
+        assert_eq!(size_label(1024), "1 KB");
+        assert_eq!(size_label(66_403), "65 KB");
+        assert_eq!(size_label(1024 * 1024), "1.0 MB");
+        assert_eq!(size_label(10_639_021), "10.1 MB");
     }
 
     #[test]

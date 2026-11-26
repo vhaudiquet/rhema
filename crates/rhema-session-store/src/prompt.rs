@@ -2,11 +2,13 @@
 
 use rhema_core::{Content, Role, Session};
 
-/// The width a picker row cuts the opening prompt to.
-pub const OPENING_PROMPT_WIDTH: usize = 48;
+/// How much of the opening prompt the listing row carries. Wide enough
+/// for the pickers' panes; a host draws what its own width leaves and
+/// ellipsizes the rest.
+pub const OPENING_PROMPT_WIDTH: usize = 200;
 
 /// The session's first non-empty user text, cut to
-/// [`OPENING_PROMPT_WIDTH`], the picker row. `None` when the history
+/// [`OPENING_PROMPT_WIDTH`], the picker's preview. `None` when the history
 /// carries no user text at all (an empty conversation, or images alone).
 pub fn opening_prompt(session: &Session) -> Option<String> {
     session

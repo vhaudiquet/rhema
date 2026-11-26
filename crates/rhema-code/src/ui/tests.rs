@@ -5092,3 +5092,71 @@ fn a_filter_with_no_match_keeps_the_titles_over_its_message() {
         "the message starts where a row does"
     );
 }
+
+/// A resume row is two lines: the prompt the pane can hold, then its
+/// age and size. A summary wider than the pane is cut with an ellipsis
+/// rather than clipped mid-word at the panel's border.
+#[test]
+fn the_resume_picker_draws_two_lines_a_session() {
+    let now = 1_000_000_000_000u64;
+    let screen = crate::screens::ResumeScreen::new(
+        vec![
+            crate::sessions::SavedSession {
+                path: "first.json".into(),
+                saved_at: now - 60_000,
+                snippet: Some(
+                    "a prompt that runs long enough to need the row's ellipsis, twice over"
+                        .to_owned(),
+                ),
+                bytes: 66_403,
+            },
+            crate::sessions::SavedSession {
+                path: "second.json".into(),
+                saved_at: now - 7_200_000,
+                snippet: None,
+                bytes: 512,
+            },
+        ],
+        now,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    terminal
+        .draw(|frame| super::dialogs::render_resume_picker(frame, &screen, &DARK))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: Vec<String> = (0..10)
+        .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+
+    assert!(
+        text[1]
+            .trim_matches(|ch: char| ch == '│' || ch.is_whitespace())
+            .is_empty(),
+        "a row of air under the frame: {text:#?}"
+    );
+    assert!(
+        text[2].contains('❯'),
+        "the marker rides the summary: {text:#?}"
+    );
+    assert!(
+        text[2].contains('…'),
+        "the summary is ellipsized to the pane: {text:#?}"
+    );
+    assert!(
+        !text[2].contains("twice over"),
+        "the tail does not fit: {text:#?}"
+    );
+    let inner = |y: usize| {
+        text[y]
+            .trim_matches(|ch: char| ch == '│' || ch.is_whitespace())
+            .to_owned()
+    };
+    assert_eq!(inner(3), "1m ago · 65 KB", "{text:#?}");
+    assert_eq!(
+        text[2].chars().position(|ch| ch == 'a'),
+        text[3].chars().position(|ch| ch == '1'),
+        "the summary and its metadata share a left margin: {text:#?}"
+    );
+    assert!(text[4].contains("(no preview)"), "{text:#?}");
+    assert_eq!(inner(5), "2h ago · 512 B", "{text:#?}");
+}
