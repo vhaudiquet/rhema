@@ -184,7 +184,9 @@ impl Verdict {
 pub(crate) struct HostKey {
     /// The local socket a reverse-forwarded UDS connection lands on.
     /// `None` on the command connections, which accept no forwarded
-    /// channel.
+    /// channel. Only a Unix host can dial the socket, so the shared
+    /// construction path writes a value no branch reads elsewhere.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) forward_to: Option<PathBuf>,
     /// Where the host keys live, `None` for the default file.
     pub(crate) known_hosts: Option<PathBuf>,
@@ -295,21 +297,34 @@ impl client::Handler for HostKey {
         reply: ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        let Some(local) = self.forward_to.clone() else {
+        #[cfg(not(unix))]
+        {
+            // The far end can request the forward, but a host without
+            // Unix sockets has no local stream to land it on.
+            let _ = channel;
             reply
                 .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
-            return Ok(());
-        };
-        reply.accept().await;
-        tokio::spawn(async move {
-            let Ok(mut stream) = tokio::net::UnixStream::connect(&local).await else {
-                return;
+            Ok(())
+        }
+        #[cfg(unix)]
+        {
+            let Some(local) = self.forward_to.clone() else {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
             };
-            let mut channel = channel.into_stream();
-            let _ = tokio::io::copy_bidirectional(&mut channel, &mut stream).await;
-        });
-        Ok(())
+            reply.accept().await;
+            tokio::spawn(async move {
+                let Ok(mut stream) = tokio::net::UnixStream::connect(&local).await else {
+                    return;
+                };
+                let mut channel = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut channel, &mut stream).await;
+            });
+            Ok(())
+        }
     }
 }
 
