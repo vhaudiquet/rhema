@@ -4025,3 +4025,32 @@ fn the_picker_rows_carry_the_current_row_first() {
         "the pinned row has no catalog card"
     );
 }
+
+/// Two pastes, the second typed before the first: each chip must ride
+/// its own anchor, not the order the payloads happened to arrive in.
+#[test]
+fn a_paste_before_an_existing_chip_lands_in_its_own_slot() {
+    let mut chat = ChatState::new();
+    let first = "a1\na2\na3\na4";
+    let second = "b1\nb2\nb3\nb4";
+    chat.paste(first);
+
+    // Put the caret before the first chip and paste again.
+    chat.handle_key(key(KeyCode::Home), &[], &[], &[], &crate::icons::UNICODE);
+    chat.paste(second);
+
+    let ChatAction::Submit { text, spans, .. } =
+        chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE)
+    else {
+        panic!("the input submits");
+    };
+    assert_eq!(
+        text,
+        format!("{second}{first}"),
+        "the second paste's payload rides the anchor before the first's"
+    );
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].start, 0, "the new payload leads");
+    assert_eq!(spans[0].end, second.len());
+    assert_eq!(spans[1].start, second.len(), "the first payload follows");
+}

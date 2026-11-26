@@ -144,7 +144,8 @@ impl ChatState {
     pub fn paste(&mut self, text: &str) {
         let normalized = Self::normalize(text);
         if normalized.lines().count() > Self::PASTE_INLINE_LINES {
-            self.chips.push(Chip::Paste(normalized));
+            let at = self.chip_index_at_cursor();
+            self.chips.insert(at, Chip::Paste(normalized));
             self.insert_char(Self::MARK);
         } else {
             self.insert_str(&normalized);
@@ -155,7 +156,8 @@ impl ChatState {
     /// never inline, an image has no inline form, and a prompt carries
     /// it as one cell beside the text, full payload on submit.
     pub fn paste_image(&mut self, image: rhema_core::Image) {
-        self.chips.push(Chip::Image(image));
+        let at = self.chip_index_at_cursor();
+        self.chips.insert(at, Chip::Image(image));
         self.insert_char(Self::MARK);
     }
 
@@ -199,6 +201,18 @@ impl ChatState {
         self.input.insert(self.byte_offset(), c);
         self.cursor += 1;
         self.palette_index = 0;
+    }
+
+    /// The chip slot the cursor's next anchor takes: how many anchors
+    /// sit before the cursor.
+    ///
+    /// `submission` pairs the k-th mark with `chips[k]`, so an anchor
+    /// pasted mid-line has to take that slot. Appending the chip to the
+    /// end instead left its mark earlier than its payload: two pastes
+    /// before an existing one came out swapped.
+    fn chip_index_at_cursor(&self) -> usize {
+        let before = self.input[..self.byte_offset()].matches(Self::MARK).count();
+        before.min(self.chips.len())
     }
 
     /// Removes `input[start..end]` (byte offsets) and, with it, the
