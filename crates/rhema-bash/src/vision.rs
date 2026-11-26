@@ -238,9 +238,7 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
     WIRED
         .get_or_init(|| {
             let dir = crate::init::temp_dir("rhema-vision").ok()?;
-            provision_in_dir(dir, bash_env, false)
-                .map(Arc::new)
-                .ok()
+            provision_in_dir(dir, bash_env, false).map(Arc::new).ok()
         })
         .as_ref()
 }

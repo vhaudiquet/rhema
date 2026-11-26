@@ -944,9 +944,8 @@ mod tests {
                 code,
             }));
         }
-        let kit = Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE).with_shell(
-            Shell::new("see", "printf '%s\\n' staged").expect("a shell macro"),
-        );
+        let kit = Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE)
+            .with_shell(Shell::new("see", "printf '%s\\n' staged").expect("a shell macro"));
         let placed = place_sandbox(&sandbox, "/workspace", std::slice::from_ref(&kit))
             .await
             .expect("vision places without gob");

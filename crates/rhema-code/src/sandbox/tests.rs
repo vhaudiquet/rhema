@@ -733,9 +733,7 @@ fn a_remote_kit_env_names_the_helper_and_the_session_state() {
         Vec::new(),
         rhema_bash::runtime::Needs::SHELL_STATE,
     )
-    .with_shell(
-        rhema_bash::runtime::Shell::new("see", "printf '%s\\n' staged").unwrap(),
-    );
+    .with_shell(rhema_bash::runtime::Shell::new("see", "printf '%s\\n' staged").unwrap());
     let env = remote_kit_env(&remote, "k1", true, true, &[jobs, vision]);
     assert_eq!(
         env.get("BASH_ENV").map(String::as_str),
