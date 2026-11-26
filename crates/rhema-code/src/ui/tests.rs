@@ -2370,16 +2370,17 @@ mod scroll_tests {
         assert!(!screen.contains("·  ·"), "{screen}");
     }
 
-    /// The footer always names where bash runs: local reads as a fact,
-    /// and a running sandbox shows its kind, or its instance's name
-    /// when the profile's active pointer names it.
+    /// The footer names where bash runs only when that is not the
+    /// host: a local session spends no segment on it, and a running
+    /// sandbox shows its kind, or its instance's name when the
+    /// profile's active pointer names it.
     #[test]
     fn the_footer_names_where_bash_runs() {
         let mut app = chat_app();
         app.config.profiles.get_mut("personal").unwrap().provider = Some("google".to_owned());
         assert!(
-            screen_text(&mut app).contains("▣ local"),
-            "the local fast path is a fact: {}",
+            !screen_text(&mut app).contains("▣"),
+            "the local fast path is no badge: {}",
             screen_text(&mut app)
         );
         app.sandboxed = Some(crate::sandbox::Sandboxed {

@@ -36,17 +36,20 @@ impl App {
 
     /// The footer's sandbox badge: the kind `bash` runs under, or the
     /// instance's name when the profile's active pointer names the
-    /// instance this kind resolves to. Local reads as a fact too, the
-    /// fast path is a choice, not an absence.
-    pub fn sandbox_badge(&self) -> String {
+    /// instance this kind resolves to. A local sandbox adds nothing to
+    /// the bar: it is the default, and the badge would name it on every
+    /// session that never left the host.
+    pub fn sandbox_badge(&self) -> Option<String> {
         let choice = self.active_sandbox();
         if choice == SandboxChoice::Local {
-            return "local".to_owned();
+            return None;
         }
-        self.effective()
-            .sandbox_instance_for(choice.stored_name())
-            .map(|(name, _)| name.to_owned())
-            .unwrap_or_else(|| choice.stored_name().to_owned())
+        Some(
+            self.effective()
+                .sandbox_instance_for(choice.stored_name())
+                .map(|(name, _)| name.to_owned())
+                .unwrap_or_else(|| choice.stored_name().to_owned()),
+        )
     }
 
     /// `/sandbox <name>`: a configured instance's name runs `bash` in

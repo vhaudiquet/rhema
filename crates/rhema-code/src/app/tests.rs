@@ -4287,7 +4287,7 @@ fn the_offered_set_rederives_for_the_profile_moving_in() {
 #[test]
 fn the_sandbox_badge_names_the_kind_or_the_instance() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
-    assert_eq!(h.app.sandbox_badge(), "local", "local is a fact too");
+    assert_eq!(h.app.sandbox_badge(), None, "the host needs no badge");
     h.app.sandboxed = Some(crate::sandbox::Sandboxed {
         choice: SandboxChoice::Docker,
         target: "work-box".to_owned(),
@@ -4304,7 +4304,7 @@ fn the_sandbox_badge_names_the_kind_or_the_instance() {
         remote_session: Default::default(),
     });
     // No instance stored: the badge is the kind.
-    assert_eq!(h.app.sandbox_badge(), "docker");
+    assert_eq!(h.app.sandbox_badge().as_deref(), Some("docker"));
     // The active pointer names the instance the kind resolves to:
     // the badge says where, not just what.
     h.app.config.set_for_profile(Some("personal"), |profile| {
@@ -4322,7 +4322,7 @@ fn the_sandbox_badge_names_the_kind_or_the_instance() {
             },
         );
     });
-    assert_eq!(h.app.sandbox_badge(), "dev");
+    assert_eq!(h.app.sandbox_badge().as_deref(), Some("dev"));
 }
 
 #[test]

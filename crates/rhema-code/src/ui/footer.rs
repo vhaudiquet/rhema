@@ -1,5 +1,6 @@
-//! The one-row footer: the model id, the workspace folder, the thinking
-//! effort letter, and the live-state hints.
+//! The one-row footer: the model id, the workspace folder, the sandbox
+//! when it is not the host, the thinking effort letter, and the
+//! live-state hints.
 
 use super::status::cost_text;
 use super::*;
@@ -106,9 +107,10 @@ pub(crate) fn effort_letter(effort: rhema_core::request::ThinkingEffort) -> &'st
 }
 
 pub(crate) fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    // The mark, then always the same facts: profile, where the session
-    // sits, model, where bash runs, context footprint against the
-    // model's window, the session's accumulated cost.
+    // The mark, then the same facts: profile, where the session sits,
+    // model, context footprint against the model's window, the
+    // session's accumulated cost. The sandbox joins them only when it
+    // is not local.
     // Every segment owns its leading separator, a trailing one on the
     // previous segment doubles as soon as an optional segment (folder,
     // allowance) sits between two others.
@@ -142,11 +144,11 @@ pub(crate) fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Th
         }
     }
     // Where bash runs: the sandbox kind, or the running instance's
-    // name when the profile's active pointer names it. Local reads as
-    // a fact too, the fast path is a choice, not an absence.
-    parts.push(
-        Span::raw(format!(" · {} {}", app.icons.sandbox, app.sandbox_badge())).fg(theme.text3),
-    );
+    // name when the profile's active pointer names it. Local has no
+    // segment, the default path does not spend the bar's width.
+    if let Some(badge) = app.sandbox_badge() {
+        parts.push(Span::raw(format!(" · {} {badge}", app.icons.sandbox)).fg(theme.text3));
+    }
     // A named thinking effort is session-relevant telemetry: the badge
     // only appears when the level would change the request. The letter
     // rides the glyph; the word it abbreviates is the /thinking
