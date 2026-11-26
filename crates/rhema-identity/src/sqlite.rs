@@ -49,7 +49,13 @@ impl SqliteIdentityStore {
     /// Opens (creating if needed) the accounts table in the database at
     /// `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, IdentityError> {
+        let path = path.as_ref();
         let conn = rusqlite::Connection::open(path)?;
+        // The file holds user records, and SQLite creates it with the
+        // umask's mode. Best effort, like every privacy helper: a
+        // filesystem that refuses mode changes must not stop the store
+        // from opening.
+        tighten(path);
         Self::init(conn, true)
     }
 
@@ -80,6 +86,24 @@ impl SqliteIdentityStore {
         })
     }
 }
+
+/// Best-effort `0600` on the database file, which SQLite creates with
+/// the umask's mode. The WAL and shm siblings follow the same umask;
+/// they live in the same directory, so that directory's mode (0700
+/// where the frontends create it) is what guards them across runs.
+#[cfg(unix)]
+fn tighten(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut permissions = meta.permissions();
+        permissions.set_mode(0o600);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
+/// No permission model here.
+#[cfg(not(unix))]
+fn tighten(_path: &Path) {}
 
 /// Reads the database's schema version stamp and reconciles it with
 /// [`VERSION`], the one seam a future schema bump has.
@@ -445,6 +469,25 @@ mod tests {
     #[test]
     fn the_contract_holds() {
         store_contract::run_all(&SqliteIdentityStore::in_memory().expect("store opens"));
+    }
+
+    /// The database holds user records; it must not open world-readable.
+    #[test]
+    #[cfg(unix)]
+    fn the_database_file_lands_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        // A file that already exists with the umask's mode, the shape a
+        // store opened before this rule left behind.
+        std::fs::write(&path, b"").expect("touch");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        SqliteIdentityStore::open(&path).expect("opens");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the database file is {mode:o}");
     }
 
     #[test]
