@@ -47,6 +47,7 @@ fn websearch_env_names_follow_the_vendors() {
     );
     assert_eq!(websearch_env_names("exa"), &["EXA_API_KEY"]);
     assert_eq!(websearch_env_names("tavily"), &["TAVILY_API_KEY"]);
+    assert_eq!(websearch_env_names("opencode"), &["OPENCODE_API_KEY"]);
     let empty: &[&str] = &[];
     assert_eq!(websearch_env_names("kagi"), empty);
 }
@@ -60,6 +61,7 @@ fn decision_env_names_follow_the_vendors() {
     );
     // The turn providers' OpenRouter spelling, the same key.
     assert_eq!(decision_env_names("openrouter"), &["OPENROUTER_API_KEY"]);
+    assert_eq!(decision_env_names("opencode"), &["OPENCODE_API_KEY"]);
     let empty: &[&str] = &[];
     assert_eq!(decision_env_names("kagi"), empty);
     assert_eq!(CLOUDFLARE_ACCOUNT_ENV, "CLOUDFLARE_ACCOUNT_ID");

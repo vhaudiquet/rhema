@@ -2,8 +2,9 @@
 //!
 //! Every frontend spells the same recipes, the `brave` kind is the
 //! Brave adapter with its `X-Subscription-Token` header, the `tavily`
-//! kind is the Tavily adapter under bearer auth, and without this
-//! crate each would spell them in its own assembly. This is the one
+//! kind is the Tavily adapter under bearer auth, the `opencode` kind
+//! is Console's hosted search under a Go or Console key, and without
+//! this crate each would spell them in its own assembly. This is the one
 //! spelling: [`build`] takes the kind as the config spells it, plus
 //! the key the caller resolved, and returns the provider as a trait
 //! object. What stays with the caller is policy: the chain, the
@@ -20,6 +21,7 @@ use rhema_websearch::MockSearchProvider;
 use rhema_websearch::{Chain, WebSearchProvider};
 use rhema_websearch_brave::BraveProvider;
 use rhema_websearch_exa::ExaProvider;
+use rhema_websearch_opencode::OpenCodeProvider;
 use rhema_websearch_tavily::TavilyProvider;
 
 /// Why a construction failed: a spelling no adapter answers to, or a
@@ -36,7 +38,7 @@ pub enum BuildError {
 
 /// The vendor spellings the config uses, in the env-only tier's fixed
 /// order (`specs/rhema-websearch.md` §3).
-pub const KINDS: [&str; 3] = ["brave", "exa", "tavily"];
+pub const KINDS: [&str; 4] = ["brave", "exa", "tavily", "opencode"];
 
 /// Builds the kind's provider from the key the caller resolved. The
 /// constructors are the adapters' defaults: no route overrides, no
@@ -60,6 +62,7 @@ pub fn build(
     match kind {
         "brave" => Ok(Arc::new(BraveProvider::new(api_key))),
         "exa" => Ok(Arc::new(ExaProvider::new(api_key))),
+        "opencode" => Ok(Arc::new(OpenCodeProvider::new(api_key))),
         // The spelling is validated above; the arm is exhaustive.
         _ => Ok(Arc::new(TavilyProvider::new(api_key))),
     }

@@ -3396,7 +3396,6 @@ fn the_add_websearch_dialog_walks_kind_name_key_and_back() {
     dialog.handle_key(key(KeyCode::Esc));
     assert_eq!(dialog.stage, WebSearchDialogStage::Kind);
     dialog.handle_key(key(KeyCode::Down));
-    dialog.handle_key(key(KeyCode::Down));
     dialog.handle_key(key(KeyCode::Enter));
     assert_eq!(dialog.kind, "tavily", "the third row");
     assert_eq!(
@@ -3678,6 +3677,45 @@ fn the_add_decision_dialog_walks_jev_name_key_and_back() {
 }
 
 #[test]
+fn the_websearch_kind_list_offers_the_hosted_search() {
+    let mut dialog = crate::screens::AddWebSearchDialog::new(BTreeSet::new());
+    for _ in 0..3 {
+        dialog.handle_key(key(KeyCode::Down));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.kind, "opencode");
+    assert_eq!(dialog.input, "OpenCode");
+}
+
+#[test]
+fn the_opencode_go_row_stores_the_subscription_endpoint_without_asking() {
+    let mut dialog = crate::screens::AddDecisionDialog::new(BTreeSet::new());
+    for _ in 0..4 {
+        dialog.handle_key(key(KeyCode::Down));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.choice.map(|k| k.display), Some("OpenCode Go"));
+    assert_eq!(dialog.input, "OpenCode Go");
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dialog.stage,
+        DecisionDialogStage::Key,
+        "the Go row skips the endpoint stage"
+    );
+    type_chars(&mut dialog, "oc_sk_go");
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        DecisionDialogAction::Submit
+    );
+    let built = dialog.build().unwrap();
+    assert_eq!(built.kind, "opencode");
+    assert_eq!(
+        built.base_url.as_deref(),
+        Some(rhema_decision_opencode::GO_BASE_URL)
+    );
+}
+
+#[test]
 fn the_decision_dialog_asks_clef_for_its_account_and_the_custom_endpoint_for_its_url() {
     // Clef: name, account, key. The account is required.
     let mut dialog = crate::screens::AddDecisionDialog::new(BTreeSet::new());
@@ -3711,7 +3749,7 @@ fn the_decision_dialog_asks_clef_for_its_account_and_the_custom_endpoint_for_its
     // a URL, and the key line opens on `local`, a server without
     // auth takes any text.
     let mut dialog = crate::screens::AddDecisionDialog::new(BTreeSet::from(["Local Jev".into()]));
-    for _ in 0..3 {
+    for _ in 0..5 {
         dialog.handle_key(key(KeyCode::Down));
     }
     dialog.handle_key(key(KeyCode::Enter));

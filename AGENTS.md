@@ -83,6 +83,8 @@ Rules:
   - `websearch-exa`: the Exa adapter (`crates/rhema-websearch-exa/`)
   - `websearch-tavily`: the Tavily adapter
     (`crates/rhema-websearch-tavily/`)
+  - `websearch-opencode`: the OpenCode hosted-search adapter
+    (`crates/rhema-websearch-opencode/`)
   - `websearch-registry`: the fleet's name-to-adapter wiring and the
     profile-to-chain assembly (`crates/rhema-websearch-registry/`)
   - `decision`: the decision-model seam: the `DecisionProvider`
@@ -95,6 +97,8 @@ Rules:
   - `decision-openrouter`: the OpenRouter Decisions adapter (the
     aggregator's route to Jev, Clef and forty-odd other System One
     models) (`crates/rhema-decision-openrouter/`)
+  - `decision-opencode`: the OpenCode Console and Go Decisions
+    adapter (`crates/rhema-decision-opencode/`)
   - `decision-registry`: the decision fleet's name-to-adapter wiring
     and the profile-to-provider resolution
     (`crates/rhema-decision-registry/`)

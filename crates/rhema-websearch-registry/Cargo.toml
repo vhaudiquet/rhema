@@ -16,6 +16,7 @@ rhema-websearch = { path = "../rhema-websearch", version = "0.4.2", default-feat
 rhema-websearch-brave = { path = "../rhema-websearch-brave", version = "0.4.2" }
 rhema-websearch-exa = { path = "../rhema-websearch-exa", version = "0.4.2" }
 rhema-websearch-tavily = { path = "../rhema-websearch-tavily", version = "0.4.2" }
+rhema-websearch-opencode = { path = "../rhema-websearch-opencode", version = "0.4.2" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -72,13 +72,17 @@ pub fn websearch_rows(
 /// row can be picked again and again, the name stage numbers the
 /// suggestions, and nothing here bounds how many instances a profile
 /// holds.
-pub const WEBSEARCH_KINDS: &[(&str, &str)] =
-    &[("brave", "Brave"), ("exa", "Exa"), ("tavily", "Tavily")];
+pub const WEBSEARCH_KINDS: &[(&str, &str)] = &[
+    ("brave", "Brave"),
+    ("exa", "Exa"),
+    ("tavily", "Tavily"),
+    ("opencode", "OpenCode"),
+];
 
 /// Which half of the add-provider dialog is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebSearchDialogStage {
-    /// The kind list: brave, exa, tavily.
+    /// The kind list: brave, exa, tavily, opencode.
     Kind,
     /// The name input, suggested from the kind.
     Name,

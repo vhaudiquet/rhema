@@ -52,6 +52,10 @@ in `rhema-core`, the boundary would be wrong; it does not.
   https://openrouter.ai/api/alpha/decisions`, Jev's wire with the
   model as a slug: one key to Jev, Clef and forty-odd other System
   One models, three of them free.
+- `rhema-decision-opencode`: the Console and Go gateway, `POST
+  https://opencode.ai/inference/systemone/v1/systemone` (Console) or
+  `…/inference/go/systemone/v1/systemone` (Go), Jev's wire again,
+  default `jev-1.14`.
 - `rhema-decision-registry`: the kind-to-adapter spelling and the
   profile-to-provider resolution, the `rhema-websearch-registry`
   precedent; `default_model`, what a blank `model` asks, so the
@@ -65,7 +69,8 @@ in `rhema-core`, the boundary would be wrong; it does not.
 - `rhema-host-agent`: one prompt-section field, `decision`.
 - `rhema-code`: the hidden `__decision` mode, the session wiring,
   and the settings page: **Decision models** in the sidebar, its
-  rows, the add dialog over the four kinds, the default, removal.
+  rows, the add dialog over the six rows (including OpenCode and
+  OpenCode Go), the default, removal.
 
 **OUT of v1** (each deliberately out, with the reason):
 
@@ -120,7 +125,8 @@ adapter crates            one HTTP call, reqwest behind `native`
 
 Every vendor answers the same body (Jev's route is
 `POST /v1/systemone`, Clef's is Workers AI's, OpenRouter's is
-`POST /api/alpha/decisions` with the model as a slug):
+`POST /api/alpha/decisions` with the model as a slug, OpenCode's is
+`POST /systemone/v1/systemone` under the Console or Go root):
 
 ```json
 {
@@ -201,6 +207,11 @@ profiles:
           provider: openrouter
           api_key: "…"                   # an OpenRouter key, the turn providers'
           model: cloudflare/clef-flash   # any slug the catalog lists; typesafe/jev-1.14 when unset
+        go:
+          provider: opencode
+          api_key: "…"                   # an OpenCode key, the turn provider's
+          base_url: https://opencode.ai/inference/go   # Go; the Console root when unset
+          model: jev-1.14                # or gemini-decision-1, gpt-6-luna-decision
 ```
 
 - `decision: Option<DecisionSettings>`, absent from the file while
@@ -221,24 +232,26 @@ Key resolution, at use time, for the default instance: the vendor
 kind's environment variable (`TYPESAFE_API_KEY`; `CLOUDFLARE_AUTH_TOKEN`
 or `CLOUDFLARE_API_TOKEN`; `OPENROUTER_API_KEY`, the turn providers'
 variable), then the secret-store entry `secret_ref` names, then the
-stored literal. The account id resolves the same way against
-`CLOUDFLARE_ACCOUNT_ID`, then the stored `account_id`.
+stored literal. OpenCode's key resolves through `OPENCODE_API_KEY`,
+the turn provider's variable. The account id resolves the same way
+against `CLOUDFLARE_ACCOUNT_ID`, then the stored `account_id`.
 
 The environment tier: a profile with no `decision` instance still
 yields a provider, the first kind in the fixed order jev, clef,
-openrouter whose variable resolves (clef needs both its token and the
-account variable). A vendor's own key comes before the aggregator's.
-A CI machine gets decisions with no config file.
+openrouter, opencode whose variable resolves (clef needs both its
+token and the account variable). A vendor's own key comes before the
+aggregator's, and the aggregator's before the gateway's. A CI machine
+gets decisions with no config file.
 
 ## 4. The adapters
 
-| | jev | clef | openrouter |
-|---|---|---|---|
-| endpoint | `POST https://api.typesafe.ai/v1/systemone` | `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/{model}` | `POST https://openrouter.ai/api/alpha/decisions` |
-| auth | `Authorization: Bearer <key>` | `Authorization: Bearer <token>` | `Authorization: Bearer <key>` |
-| model | a body field, default `jev-latest` | the route and a body field, `clef` or `clef-flash` | a body field, a slug, default `typesafe/jev-1.14` |
-| response | the System One body as it stands | under Workers AI's `{result, success, errors, messages}` envelope | the System One body plus `id`, `provider`, `usage.cost`; no `legend` on a score |
-| refused request | 400/422 with `detail` | 400 with `errors[].message` | 400 with `error.message` |
+| | jev | clef | openrouter | opencode |
+|---|---|---|---|---|
+| endpoint | `POST https://api.typesafe.ai/v1/systemone` | `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/{model}` | `POST https://openrouter.ai/api/alpha/decisions` | `POST https://opencode.ai/inference/systemone/v1/systemone`, Go: `…/inference/go/systemone/v1/systemone` |
+| auth | `Authorization: Bearer <key>` | `Authorization: Bearer <token>` | `Authorization: Bearer <key>` | `Authorization: Bearer <key>` |
+| model | a body field, default `jev-latest` | the route and a body field, `clef` or `clef-flash` | a body field, a slug, default `typesafe/jev-1.14` | a body field, default `jev-1.14` |
+| response | the System One body as it stands | under Workers AI's `{result, success, errors, messages}` envelope | the System One body plus `id`, `provider`, `usage.cost`; no `legend` on a score | the System One body as it stands |
+| refused request | 400/422 with `detail` | 400 with `errors[].message` | 400 with `error.message` | 400 with `error.message` |
 
 OpenRouter's Decisions route is the same wire as Jev's: the router
 normalized every vendor under one contract, which is the proof that
@@ -262,6 +275,13 @@ statuses through `DecisionError::from_status` (400 and 422 are
 `RateLimited`; anything else `Http` with the detail), and a body that
 is not the documented shape is `Parse`. A vendor changing its JSON
 breaks one adapter's `Parse` arm and nothing else.
+
+OpenCode's gateway answers Jev's wire, so its adapter is Jev's with
+another root. The root is the instance's `base_url`: the Console root
+is the default, the Go root is `…/inference/go`. Decision requests do
+not need the `x-opencode-session` header the turn provider sends, so
+any script can call them with a Go key. The client sends its own user
+agent, which Console asks of every traffic source.
 
 The `native` feature carries reqwest, default on. The base crate's
 trait is transport-free, so a future host-fetch adapter for the
@@ -348,7 +368,8 @@ crates/
   rhema-decision-jev/        -> rhema-decision
   rhema-decision-clef/       -> rhema-decision
   rhema-decision-openrouter/ -> rhema-decision
-  rhema-decision-registry/   -> rhema-decision + the three adapters
+  rhema-decision-opencode/   -> rhema-decision
+  rhema-decision-registry/   -> rhema-decision + the four adapters
                               + rhema-config (the profile resolution)
   rhema-bash/                decision module; no fleet dependency,
                               the function is strings
@@ -362,7 +383,7 @@ crates/
 `rhema-decision` depends on `serde`, `serde_json` (the vocabulary
 rides JSON), `tokio` (time, for the budget), and `async-trait`. The
 registry crate is `build(instance, key) -> Result<Arc<dyn
-DecisionProvider>, BuildError>` over three arms plus `resolve(profile,
+DecisionProvider>, BuildError>` over four arms plus `resolve(profile,
 secrets) -> Result<Arc<dyn DecisionProvider>, ResolveError>`, the
 default instance, else the environment tier, kept a crate
 for the reason `rhema-provider-registry`'s docs give: the spelling
@@ -462,8 +483,10 @@ place, `decision_wire.rs`, called by both.
   default marked as [`DecisionSettings::active_instance`] rules it,
   then the add row) and the add dialog (`AddDecisionDialog`: the
   kind list, then the kind's own stages, the key always last). The
-  kinds are the registry's three plus a fourth row, "Custom Jev
-  endpoint", which is the `jev` kind with a `base_url` (decision 5)
+  rows are the registry's four kinds, with OpenCode as two rows
+  (Console and Go: the Go row stores `…/inference/go` without asking
+  for it), plus a final "Custom Jev endpoint" row, which is the
+  `jev` kind with a `base_url` (decision 5)
   and opens the key line on `local`, since a server without auth
   takes any text and `build` refuses a blank. The app's handlers sit
   beside the web search ones in `app/settings.rs`: a submit places
@@ -542,3 +565,10 @@ nothing (`rhema-cloud-agent/src/assembly.rs` sets `decision: None`).
    of them free, which is how a profile with no vendor account gets
    decisions. Its alpha shape is this adapter's `Parse` to break; a
    refusal it returns is an answer (§6), never a silent no.
+10. **OpenCode is a kind with two roots.** A Go subscription includes
+    the decision models beside the text ones, and a Console key
+    reaches the same route from the balance. The instance's
+    `base_url` picks the root, so "OpenCode" and "OpenCode Go" are
+    two profiles of one kind, the turn provider's arrangement, not
+    two adapters. The default is Console, the route every key reaches;
+    the settings page's Go row stores the subscription root.

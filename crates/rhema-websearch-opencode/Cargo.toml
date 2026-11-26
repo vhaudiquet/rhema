@@ -1,0 +1,35 @@
+[package]
+name = "rhema-websearch-opencode"
+description = "OpenCode hosted web search adapter for the rhema WebSearchProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["native"]
+# The reqwest transport behind the default constructor. Off in builds
+# whose host has no sockets to speak of; the wire types and the pure
+# mapping stay, so another host answers the same trait over its own
+# HTTP.
+native = ["dep:reqwest"]
+
+[dependencies]
+# The seam this crate implements and the vocabulary it speaks
+rhema-websearch = { path = "../rhema-websearch", version = "0.4.2", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# dyn WebSearchProvider
+async-trait = { workspace = true }
+# HTTP against the Console gateway (feature `native`)
+reqwest = { version = "0.13", features = ["json"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# In-process HTTP mock for offline adapter tests
+wiremock = "0.6"
+
+[lints]
+workspace = true

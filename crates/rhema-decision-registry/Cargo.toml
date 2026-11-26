@@ -16,6 +16,7 @@ rhema-decision = { path = "../rhema-decision", version = "0.4.2", default-featur
 rhema-decision-jev = { path = "../rhema-decision-jev", version = "0.4.2" }
 rhema-decision-clef = { path = "../rhema-decision-clef", version = "0.4.2" }
 rhema-decision-openrouter = { path = "../rhema-decision-openrouter", version = "0.4.2" }
+rhema-decision-opencode = { path = "../rhema-decision-opencode", version = "0.4.2" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

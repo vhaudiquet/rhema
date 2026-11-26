@@ -8870,7 +8870,7 @@ fn a_clef_decision_model_carries_its_account_and_a_local_one_its_endpoint() {
             panic!("settings open");
         };
         let dialog = settings.decision_dialog.as_mut().unwrap();
-        for _ in 0..3 {
+        for _ in 0..5 {
             dialog.handle_key(key(KeyCode::Down));
         }
         dialog.handle_key(key(KeyCode::Enter)); // "Local Jev"

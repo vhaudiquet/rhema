@@ -115,6 +115,8 @@ rhema-websearch-registry = { path = "../rhema-websearch-registry", version = "0.
 # the __decision mode runs (the adapters ride behind the registry)
 rhema-decision = { path = "../rhema-decision", version = "0.4.2", default-features = false }
 rhema-decision-registry = { path = "../rhema-decision-registry", version = "0.4.2" }
+# The add dialog prefills the Go endpoint its decision row stores
+rhema-decision-opencode = { path = "../rhema-decision-opencode", version = "0.4.2" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 serde_yaml.workspace = true
 # The installer's published `<url>.sha256` is checked before it runs

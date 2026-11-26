@@ -29,9 +29,10 @@ of the `see`/`job` family. If wiring this needed a new type in
   (ordered fallback over trait objects), the markdown renderer, and a
   `MockSearchProvider` behind a `mock` feature. No HTTP in this crate.
 - `rhema-websearch-brave`, `rhema-websearch-exa`,
-  `rhema-websearch-tavily`: one adapter per vendor, reqwest behind a
-  `native` feature (the `rhema-provider-anthropic` shape), offline
-  tests against an in-process wiremock.
+  `rhema-websearch-tavily`, `rhema-websearch-opencode`: one adapter
+  per vendor or gateway, reqwest behind a `native` feature (the
+  `rhema-provider-anthropic` shape), offline tests against an
+  in-process wiremock.
 - `rhema-websearch-registry`: the kind-to-adapter spelling, the
   `rhema-provider-registry` precedent at search scale (§12.5).
 - `rhema-config`: per-profile websearch instances and their chain
@@ -175,7 +176,7 @@ profiles:
 
 ```rust
 pub struct WebSearchInstance {
-    pub provider: String,   // brave | exa | tavily
+    pub provider: String,   // brave | exa | tavily | opencode
     pub api_key: Option<String>,    // redacted in Debug
     pub secret_ref: Option<String>, // store id, fresh_id() shape
 }
@@ -185,15 +186,16 @@ Key resolution, per instance, at use time, the `instance_api_key`
 tiers in order:
 
 1. The provider kind's environment variable: `BRAVE_SEARCH_API_KEY`
-   (or `BRAVE_API_KEY`), `EXA_API_KEY`, `TAVILY_API_KEY`.
+   (or `BRAVE_API_KEY`), `EXA_API_KEY`, `TAVILY_API_KEY`,
+   `OPENCODE_API_KEY` (the turn provider's key).
 2. The secret-store entry `secret_ref` names, through the `SecretStore`
    seam.
 3. The stored literal `api_key`.
 
 The env-only tier: a profile with no `websearch` section still yields
 a chain, one entry per kind whose environment variable resolves, in
-the fixed kind order brave, exa, tavily. A CI machine gets search
-with no config file; the availability gate (§10) counts it.
+the fixed kind order brave, exa, tavily, opencode. A CI machine gets
+search with no config file; the availability gate (§10) counts it.
 
 ## 4. The adapters
 
@@ -202,7 +204,8 @@ One crate per vendor, one struct each, all behind the same trait:
 ```rust
 #[async_trait]
 pub trait WebSearchProvider: Send + Sync {
-    /// The vendor spelling the config uses: brave, exa, tavily.
+    /// The vendor spelling the config uses: brave, exa, tavily,
+    /// opencode.
     fn kind(&self) -> &'static str;
     async fn search(&self, query: &SearchQuery)
         -> Result<Vec<SearchResult>, SearchError>;
@@ -236,15 +239,22 @@ pub enum SearchError {
 
 The mapping each adapter pins:
 
-| | brave | exa | tavily |
-|---|---|---|---|
-| endpoint | `GET https://api.search.brave.com/res/v1/web/search`, news: `/res/v1/news/search` | `POST https://api.exa.ai/search` | `POST https://api.tavily.com/search` |
-| auth | `X-Subscription-Token` header | `x-api-key` header | `Authorization: Bearer` header |
-| query | `q` | `query` | `query` |
-| count | `count` (1..=20) | `numResults` | `max_results` |
-| news | the news endpoint | `category: "news"` | `topic: "news"` |
-| snippet | `web.results[].description` (news: `results[].description`) | `contents.text` capped at request time, trimmed | `results[].content` |
-| extras sent | none | `contents: { text: { maxCharacters: 500 } }` | `include_answer: false`, `include_raw_content: false`, `search_depth: "basic"` |
+| | brave | exa | tavily | opencode |
+|---|---|---|---|---|
+| endpoint | `GET https://api.search.brave.com/res/v1/web/search`, news: `/res/v1/news/search` | `POST https://api.exa.ai/search` | `POST https://api.tavily.com/search` | `POST https://opencode.ai/console/api/websearch` |
+| auth | `X-Subscription-Token` header | `x-api-key` header | `Authorization: Bearer` header | `Authorization: Bearer` header |
+| query | `q` | `query` | `query` | `query`, plus `providerID: "opencode"` |
+| count | `count` (1..=20) | `numResults` | `max_results` | none; the route returns up to eight, the adapter trims |
+| news | the news endpoint | `category: "news"` | `topic: "news"` | none; the route has no news index |
+| snippet | `web.results[].description` (news: `results[].description`) | `contents.text` capped at request time, trimmed | `results[].content` | `results[].content` |
+| extras sent | none | `contents: { text: { maxCharacters: 500 } }` | `include_answer: false`, `include_raw_content: false`, `search_depth: "basic"` | none |
+
+OpenCode's kind is Console's hosted search, enabled per workspace by
+its owner and billed at $0.01 per successful search. A Go key is a
+Console key, so a Go subscription reaches the same route. The
+response names the provider that answered; a name other than
+`opencode` is a `Parse`, since another provider's results reported as
+this kind's would misattribute the bill.
 
 Every adapter takes the key in its constructor, returns results in
 vendor order (no re-sorting: the vendor's ranking is the product),
@@ -340,7 +350,8 @@ crates/
   rhema-websearch-brave/      -> rhema-websearch
   rhema-websearch-exa/        -> rhema-websearch
   rhema-websearch-tavily/     -> rhema-websearch
-  rhema-websearch-registry/   -> rhema-websearch + the three adapters
+  rhema-websearch-opencode/   -> rhema-websearch
+  rhema-websearch-registry/   -> rhema-websearch + the four adapters
                               + rhema-config (the profile assembly)
   rhema-bash/                 websearch module; no fleet dependency,
                               the function is strings
@@ -355,10 +366,10 @@ crates/
 `rhema-websearch` depends on `tokio` (time, for the budgets) and
 `async-trait`; serde is not among its needs, the types never
 serialize. The registry crate is one `build(kind, api_key) ->
-Result<Arc<dyn WebSearchProvider>, BuildError>` over three arms, kept
+Result<Arc<dyn WebSearchProvider>, BuildError>` over four arms, kept
 a crate, not a function in each frontend, for the reason
 `rhema-provider-registry`'s docs give: the spelling lives in one
-place, so a fourth vendor is one arm there and no frontend edits.
+place, so a fifth vendor is one arm there and no frontend edits.
 
 ## 9. How we know it works
 
@@ -401,7 +412,7 @@ jobs -> vision -> search -> MCP     (the BASH_ENV lineage)
 
 The gate is `sandboxed.is_none() && configured`, where `configured`
 is: the profile holds at least one instance whose key resolves, or
-any of the three environment variables is set. The gate needs the
+any of the four environment variables is set. The gate needs the
 same resolution the mode runs, so it lives in one place,
 `search_wire.rs`, called by both. Sandboxed sessions get no function
 and no section, the vision rule.
@@ -476,28 +487,40 @@ Each commit is green on the three checks in AGENTS.md.
    binary; the binary resolves the secret store and the file in-process.
    `env` in the agent's shell shows `RHEMA_SEARCH_PROFILE`, never a
    key, and the prompt section says nothing about keys.
-5. **A registry crate for three arms.** The alternative, `build` in
-   each frontend, is the drift `rhema-provider-registry` exists to
-   kill. Three arms now, the fourth vendor is one arm later, and the
-   claw gets the same spelling for free.
+5. **A registry crate for one arm per kind.** The alternative,
+   `build` in each frontend, is the drift `rhema-provider-registry`
+   exists to kill. Four arms now, the fifth vendor is one arm later,
+   and the claw gets the same spelling for free.
 6. **Sequential fallback, first success wins, empty is success.** The
    chain is a reliability ladder, not a meta-search. Racing bills
    every provider; falling through on zero results bills two
    providers for one honest answer.
-7. **`--news` in v1.** All three vendors map it to one parameter or
-   endpoint, and "what happened today" is the query a snippet index
-   answers worst without it. Freshness dates, regions, safe search
-   wait for a use.
+7. **`--news` in v1.** Brave, Exa and Tavily map it to one parameter
+   or endpoint, and "what happened today" is the query a snippet
+   index answers worst without it. OpenCode's hosted route has no
+   news index, so the flag leaves its query unchanged; the adapter's
+   docs say so. Freshness dates, regions, safe search wait for a
+   use.
 8. **Markdown, not JSON.** The shell returns text; the numbered list
    is the model's reading shape, and the renderer caps it. A
    `--json` flag would serve callers that do not exist yet.
 9. **Env names follow the vendors' own.** `BRAVE_SEARCH_API_KEY`,
-   `EXA_API_KEY`, `TAVILY_API_KEY`, the spellings their docs and SDKs
-   use, with `BRAVE_API_KEY` accepted as a second name. Config
-   vocabulary stays internal (`brave`, `exa`, `tavily`).
+   `EXA_API_KEY`, `TAVILY_API_KEY`, `OPENCODE_API_KEY`, the spellings
+   their docs and SDKs use, with `BRAVE_API_KEY` accepted as a second
+   name. OpenCode's name is the turn provider's, one key for the
+   workspace. Config vocabulary stays internal (`brave`, `exa`,
+   `tavily`, `opencode`).
 10. **Unordered instances are inert.** The order is the whole chain,
     not a priority hint. Silent appends would make a hand edit mean
     something its author did not write.
+11. **OpenCode hosted search is a kind beside the vendors.** It is
+    Console's hosted search behind a key the user already holds, so it
+    joins the chain like the rest, with no new field: the key is
+    `OPENCODE_API_KEY`, the instance's provider is `opencode`, and a
+    workspace that never enabled hosted search fails as an `Http`
+    the chain falls through. The route has no count or news field;
+    the caller's count trims the eight results, and `--news` cannot
+    narrow it (decision 7).
 
 ## 13. Follow-ups
 

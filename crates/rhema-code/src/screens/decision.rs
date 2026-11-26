@@ -6,10 +6,11 @@ use super::*;
 
 /// One kind the add dialog offers: the registry's spelling, the
 /// display name the list shows, the instance name the name stage
-/// suggests, and the stages the dialog walks after the kind. A custom
-/// Jev endpoint is the `jev` kind with a `base_url`
-/// (`specs/rhema-decision.md` §11, decision 5): the registry knows
-/// three kinds, the dialog offers four rows.
+/// suggests, the endpoint the instance stores without asking, and the
+/// stages the dialog walks after the kind. A custom Jev endpoint is
+/// the `jev` kind with a `base_url` (`specs/rhema-decision.md` §11,
+/// decision 5): the registry knows four kinds, the dialog offers six
+/// rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecisionKind {
     /// The registry's spelling, what the file's `provider` holds.
@@ -18,6 +19,10 @@ pub struct DecisionKind {
     pub display: &'static str,
     /// The instance name the name stage suggests.
     pub suggestion: &'static str,
+    /// The endpoint the chosen row stores, when it names one: the
+    /// OpenCode Go row stores the subscription root so the key stage
+    /// asks only for the key.
+    pub base_url: Option<&'static str>,
     /// The stages after the kind stage, in order, ending in the key.
     pub stages: &'static [DecisionDialogStage],
 }
@@ -35,12 +40,14 @@ pub const DECISION_KINDS: &[DecisionKind] = &[
         kind: "jev",
         display: "Jev",
         suggestion: "Jev",
+        base_url: None,
         stages: &[DecisionDialogStage::Name, DecisionDialogStage::Key],
     },
     DecisionKind {
         kind: "clef",
         display: "Clef",
         suggestion: "Clef",
+        base_url: None,
         stages: &[
             DecisionDialogStage::Name,
             DecisionDialogStage::Account,
@@ -51,12 +58,28 @@ pub const DECISION_KINDS: &[DecisionKind] = &[
         kind: "openrouter",
         display: "OpenRouter",
         suggestion: "OpenRouter",
+        base_url: None,
+        stages: &[DecisionDialogStage::Name, DecisionDialogStage::Key],
+    },
+    DecisionKind {
+        kind: "opencode",
+        display: "OpenCode",
+        suggestion: "OpenCode",
+        base_url: None,
+        stages: &[DecisionDialogStage::Name, DecisionDialogStage::Key],
+    },
+    DecisionKind {
+        kind: "opencode",
+        display: "OpenCode Go",
+        suggestion: "OpenCode Go",
+        base_url: Some(rhema_decision_opencode::GO_BASE_URL),
         stages: &[DecisionDialogStage::Name, DecisionDialogStage::Key],
     },
     DecisionKind {
         kind: "jev",
         display: "Custom Jev endpoint",
         suggestion: "Local Jev",
+        base_url: None,
         stages: &[
             DecisionDialogStage::Name,
             DecisionDialogStage::Endpoint,
@@ -180,6 +203,9 @@ impl DecisionDialogStage {
             Self::Key => match kind.display {
                 "Clef" => "Cloudflare mints the token · ctrl-v paste · enter stores · esc back",
                 "OpenRouter" => "openrouter.ai mints it · ctrl-v paste · enter stores · esc back",
+                "OpenCode" | "OpenCode Go" => {
+                    "opencode.ai/console mints it · ctrl-v paste · enter stores · esc back"
+                }
                 "Custom Jev endpoint" => {
                     "its key, or anything locally · ctrl-v paste · enter stores · esc back"
                 }
@@ -365,6 +391,7 @@ impl AddDecisionDialog {
             KeyCode::Enter => {
                 let choice = self.selected_kind();
                 self.choice = Some(choice);
+                self.base_url = choice.base_url.map(str::to_owned);
                 self.error = None;
                 // The suggested name is the kind's own, numbered when
                 // taken: Jev, "Jev 2", the Providers page's convention

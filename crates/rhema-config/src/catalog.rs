@@ -160,6 +160,9 @@ pub fn websearch_env_names(kind: &str) -> &'static [&'static str] {
         "brave" => &["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"],
         "exa" => &["EXA_API_KEY"],
         "tavily" => &["TAVILY_API_KEY"],
+        // The turn provider's key: one Console key serves Go and
+        // hosted search in the workspace it belongs to.
+        "opencode" => &["OPENCODE_API_KEY"],
         _ => &[],
     }
 }
@@ -173,6 +176,9 @@ pub fn decision_env_names(kind: &str) -> &'static [&'static str] {
         "jev" => &["TYPESAFE_API_KEY"],
         "clef" => &["CLOUDFLARE_AUTH_TOKEN", "CLOUDFLARE_API_TOKEN"],
         "openrouter" => &["OPENROUTER_API_KEY"],
+        // The turn provider's key: OpenCode Go covers the decision
+        // models beside the text ones.
+        "opencode" => &["OPENCODE_API_KEY"],
         _ => &[],
     }
 }

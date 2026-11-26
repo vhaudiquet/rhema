@@ -4261,6 +4261,7 @@ dependencies = [
  "rhema-config",
  "rhema-core",
  "rhema-decision",
+ "rhema-decision-opencode",
  "rhema-decision-registry",
  "rhema-host-agent",
  "rhema-prompt",
@@ -4361,6 +4362,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-decision-opencode"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rhema-decision",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-decision-openrouter"
 version = "0.4.2"
 dependencies = [
@@ -4380,6 +4393,7 @@ dependencies = [
  "rhema-decision",
  "rhema-decision-clef",
  "rhema-decision-jev",
+ "rhema-decision-opencode",
  "rhema-decision-openrouter",
  "serde_json",
  "thiserror 2.0.21",
@@ -4878,6 +4892,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-websearch-opencode"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rhema-websearch",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-websearch-registry"
 version = "0.4.2"
 dependencies = [
@@ -4885,6 +4912,7 @@ dependencies = [
  "rhema-websearch",
  "rhema-websearch-brave",
  "rhema-websearch-exa",
+ "rhema-websearch-opencode",
  "rhema-websearch-tavily",
  "thiserror 2.0.21",
  "tokio",

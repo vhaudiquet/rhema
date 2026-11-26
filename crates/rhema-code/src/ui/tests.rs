@@ -2393,6 +2393,9 @@ mod scroll_tests {
             shared: None,
             mcp: crate::mcp_config::McpStore::local(None, &Default::default()),
             session: Default::default(),
+            sandbox: None,
+            remote: None,
+            remote_session: Default::default(),
         });
         app.config.set_for_profile(Some("personal"), |profile| {
             profile.sandbox = Some(rhema_config::SandboxSettings {

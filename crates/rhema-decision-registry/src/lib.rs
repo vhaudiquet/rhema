@@ -24,6 +24,7 @@ use rhema_config::{CLOUDFLARE_ACCOUNT_ENV, DecisionInstance, Profile, decision_e
 use rhema_decision::DecisionProvider;
 use rhema_decision_clef::{ClefModel, ClefProvider};
 use rhema_decision_jev::JevProvider;
+use rhema_decision_opencode::OpenCodeProvider;
 use rhema_decision_openrouter::OpenRouterProvider;
 
 /// Why a construction failed: a spelling no adapter answers to, a
@@ -53,15 +54,17 @@ pub enum BuildError {
 /// The vendor spellings the config uses, in the environment tier's
 /// fixed order: the first kind whose variables resolve is the one
 /// asked (`specs/rhema-decision.md` §3). The vendors' own keys come
-/// before the aggregator's: a machine holding several is asked the
-/// most direct one.
-pub const KINDS: [&str; 3] = ["jev", "clef", "openrouter"];
+/// before the aggregator's, and the aggregator's before the gateway's:
+/// a machine holding several is asked the most direct one.
+pub const KINDS: [&str; 4] = ["jev", "clef", "openrouter", "opencode"];
 
 /// Builds the instance's provider from the key the caller resolved.
 /// The model is the instance's: Jev defaults to its moving alias,
-/// Clef to the 27B model, OpenRouter to Jev 1.14 by slug; the account
-/// id is resolved here too, since only Clef needs one and an instance
-/// of another kind without it must not fail.
+/// Clef to the 27B model, OpenRouter to Jev 1.14 by slug, OpenCode to
+/// Jev 1.14; the account id is resolved here too, since only Clef
+/// needs one and an instance of another kind without it must not
+/// fail. An OpenCode instance's `base_url` chooses pay-as-you-go or
+/// Go; without one the adapter speaks to Console.
 ///
 /// # Errors
 ///
@@ -117,6 +120,20 @@ pub fn build(
             };
             Ok(Arc::new(provider))
         }
+        "opencode" => {
+            // The model is a gateway name, free text: Go's catalog
+            // adds decision models faster than a list here.
+            let provider = OpenCodeProvider::new(key);
+            let provider = match model {
+                Some(model) => provider.with_model(model),
+                None => provider,
+            };
+            let provider = match base_url {
+                Some(base_url) => provider.with_base_url(base_url),
+                None => provider,
+            };
+            Ok(Arc::new(provider))
+        }
         // The spelling is validated above; the one left is Clef.
         _ => {
             let account_id = instance.account_id().ok_or(BuildError::MissingAccountId)?;
@@ -147,6 +164,7 @@ pub fn default_model(kind: &str) -> Option<&'static str> {
     match kind {
         "jev" => Some(rhema_decision_jev::DEFAULT_MODEL),
         "openrouter" => Some(rhema_decision_openrouter::DEFAULT_MODEL),
+        "opencode" => Some(rhema_decision_opencode::DEFAULT_MODEL),
         "clef" => Some(ClefModel::default().as_str()),
         _ => None,
     }
@@ -171,8 +189,8 @@ pub enum ResolveError {
     #[error(
         "no decision instance is configured (a `decision` section with an \
          `instances` entry in the profile, or a TYPESAFE_API_KEY, \
-         CLOUDFLARE_AUTH_TOKEN + CLOUDFLARE_ACCOUNT_ID or OPENROUTER_API_KEY \
-         environment variable)"
+         CLOUDFLARE_AUTH_TOKEN + CLOUDFLARE_ACCOUNT_ID, OPENROUTER_API_KEY \
+         or OPENCODE_API_KEY environment variable)"
     )]
     Unconfigured,
     /// The profile's default instance, not buildable: a kind
@@ -390,6 +408,34 @@ mod tests {
             serde_json::from_slice(&server.received_requests().await.unwrap().remove(0).body)
                 .unwrap();
         assert_eq!(body["model"], "cloudflare/clef-flash");
+    }
+
+    #[tokio::test]
+    async fn the_opencode_kind_rides_the_systemone_route_at_its_stored_root() {
+        // Go's root on a wiremock: the stored base_url chooses the
+        // subscription route, and the model rides the body.
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/systemone/v1/systemone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "jev-1.14",
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+                "usage": {"input_tokens": 1, "output_tokens": 0}
+            })))
+            .mount(&server)
+            .await;
+        let mut routed = instance("opencode", Some("oc_sk"));
+        routed.base_url = Some(server.uri());
+        routed.model = Some("gemini-decision-1".into());
+        let provider = build(&routed, "oc_sk".into()).unwrap();
+        let request = rhema_decision::DecisionRequest::new("s")
+            .with_question("q", rhema_decision::Question::noul("x?"));
+        assert_eq!(provider.decide(&request).await.unwrap().model, "jev-1.14");
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap().remove(0).body)
+                .unwrap();
+        assert_eq!(body["model"], "gemini-decision-1");
     }
 
     #[test]
