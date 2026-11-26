@@ -26,6 +26,13 @@ age = { git = "https://github.com/str4d/rage", rev = "eaa85530ba78734924ccf41b16
 # there, and an SSH session skips it (see src/secrets.rs).
 keyring = { version = "4", default-features = false, features = ["v1"] }
 
+# age's rand pulls getrandom, whose wasm32-unknown-unknown backend is
+# opt-in and would otherwise fail the cloud frontend's wasm check. The
+# feature is enabled on that target only, through the crate that brings
+# getrandom into the graph.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [dev-dependencies]
 tempfile = "3"
 

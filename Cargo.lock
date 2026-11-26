@@ -4304,6 +4304,7 @@ name = "rhema-config"
 version = "0.4.2"
 dependencies = [
  "age",
+ "getrandom 0.4.3",
  "keyring",
  "rhema-core",
  "serde",
