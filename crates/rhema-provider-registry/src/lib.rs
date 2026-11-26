@@ -47,6 +47,12 @@ pub enum BuildError {
     /// The llama.cpp kind needs a server address and none came.
     #[error("llama-cpp needs a server url")]
     MissingLlamaUrl,
+    /// The kind has no route override: its endpoint is minted by its
+    /// own login (the GitHub device flow, the Codex backend), so a
+    /// stored `base_url` could only be ignored. Silently ignoring it
+    /// would send traffic somewhere the user did not ask for.
+    #[error("{0} has no route override; the stored base url cannot be used")]
+    UnsupportedBaseUrl(String),
 }
 
 /// One kind's adapters: what turns ride and what the catalog lists.
@@ -77,7 +83,10 @@ where
 /// present). `llama_url` is required for `llama-cpp` and ignored
 /// otherwise. `base_url` is a stored route override: `None` keeps the
 /// kind's default route (none for openai, deepseek's endpoint for
-/// deepseek, Z.ai's plan route for zai), `Some` replaces it.
+/// deepseek, Z.ai's plan route for zai), `Some` replaces it. A kind
+/// whose endpoint its own login mints, copilot and chatgpt, has no
+/// route to override: a stored url there is an error, never a silent
+/// no-op.
 ///
 /// The kinds whose endpoints speak the Responses API default to it:
 /// deepseek, opencode, and openrouter always (all three are one
@@ -111,11 +120,37 @@ pub fn build(
             .ok_or_else(|| BuildError::MissingKey(name.to_owned()))
     };
     let built = match name {
-        "google" => assembled(GoogleProvider::new(keyed()?)),
-        "anthropic" => assembled(AnthropicProvider::new(keyed()?)),
-        "openrouter" => assembled(OpenRouterProvider::new(keyed()?)),
-        "copilot" => assembled(CopilotProvider::new(keyed()?)),
-        "chatgpt" => assembled(ChatGptProvider::new(keyed()?)),
+        "google" => {
+            let mut provider = GoogleProvider::new(keyed()?);
+            if let Some(base_url) = non_blank(base_url) {
+                provider = provider.with_base_url(base_url);
+            }
+            assembled(provider)
+        }
+        "anthropic" => {
+            let mut provider = AnthropicProvider::new(keyed()?);
+            if let Some(base_url) = non_blank(base_url) {
+                provider = provider.with_base_url(base_url);
+            }
+            assembled(provider)
+        }
+        "openrouter" => {
+            let mut provider = OpenRouterProvider::new(keyed()?);
+            if let Some(base_url) = non_blank(base_url) {
+                provider = provider.with_base_url(base_url);
+            }
+            assembled(provider)
+        }
+        "copilot" | "chatgpt" => {
+            if non_blank(base_url).is_some() {
+                return Err(BuildError::UnsupportedBaseUrl(name.to_owned()));
+            }
+            if name == "copilot" {
+                assembled(CopilotProvider::new(keyed()?))
+            } else {
+                assembled(ChatGptProvider::new(keyed()?))
+            }
+        }
         "openai" => {
             let mut provider = OpenAiCompatibleProvider::new(keyed()?)
                 .with_api(chosen_api(api, base_url))
@@ -388,5 +423,47 @@ mod tests {
         let zai = build("zai", Some("k"), None, Some("https://proxy.internal"), None)
             .expect("the override builds");
         let _ = zai;
+    }
+}
+
+#[cfg(test)]
+mod route_override_tests {
+    use super::*;
+
+    /// A kind with no route to override rejects a stored url instead of
+    /// building a provider that would ignore it.
+    #[test]
+    fn a_minted_endpoint_rejects_a_stored_base_url() {
+        for kind in ["copilot", "chatgpt"] {
+            let err = build(kind, Some("tok"), None, Some("http://localhost:1234"), None)
+                .err()
+                .unwrap_or_else(|| panic!("{kind} built over a stored base url"));
+            assert!(
+                matches!(err, BuildError::UnsupportedBaseUrl(ref name) if name == kind),
+                "{kind}: {err}"
+            );
+            // Unset and blank still build: the override check never
+            // fires on the value every stored profile has by default.
+            assert!(build(kind, Some("tok"), None, None, None).is_ok());
+            assert!(build(kind, Some("tok"), None, Some("  "), None).is_ok());
+        }
+    }
+
+    /// The kinds that do carry a route accept the override.
+    #[test]
+    fn a_route_override_builds() {
+        for kind in ["anthropic", "google", "openrouter"] {
+            assert!(
+                build(
+                    kind,
+                    Some("tok"),
+                    None,
+                    Some("http://localhost:1234/v1"),
+                    None
+                )
+                .is_ok(),
+                "{kind} refused its own route override"
+            );
+        }
     }
 }
