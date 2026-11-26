@@ -615,8 +615,11 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             let path = save
                 .clone()
                 .unwrap_or_else(|| failed_checkpoint_path(&workspace));
+            // The note goes to stderr: stdout is exactly the reply, and
+            // a pipe reading this run would otherwise find a status line
+            // glued to the end of the model's answer.
             match PathStore::new(&path).save(agent.session()) {
-                Ok(()) => println!(
+                Ok(()) => eprintln!(
                     "· checkpoint: the partial session is at {} (resume with --resume {})",
                     path.display(),
                     path.display()
