@@ -5224,3 +5224,20 @@ fn the_all_workspaces_resume_picker_names_each_workspace() {
     assert!(row.contains("1m ago"), "the age survives: {row:?}");
     assert!(row.contains("65 KB"), "the size survives: {row:?}");
 }
+
+/// The clamped tail breaks at a whitespace in the row's second half,
+/// and the halves are counted in chars: comparing a byte offset with a
+/// char count cut lines holding any multibyte character far too early.
+#[test]
+fn a_clamped_line_measures_its_halves_in_chars() {
+    // `éé abc` is six characters but eight bytes: the space sits at byte
+    // four, past half the bytes, and at char two, before half the chars.
+    let rows = wrap_clamped("éé abcde f", 8, 0, 1, ratatui::style::Style::default());
+    assert_eq!(rows.len(), 1);
+    let text: String = rows[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(text, "éé abc…", "the words that fit are kept");
+}

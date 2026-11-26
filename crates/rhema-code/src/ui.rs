@@ -484,8 +484,13 @@ fn wrap_clamped(
             .collect::<String>()
             .trim_end()
             .to_owned();
+        // `rfind` answers a byte offset and the halfway test is in
+        // chars: comparing the two broke at the first whitespace once
+        // any multibyte character pushed the byte count past half.
         let cut = match raw.rfind(char::is_whitespace) {
-            Some(pos) if pos >= raw.chars().count() / 2 => raw[..pos].trim_end().to_owned(),
+            Some(pos) if raw[..pos].chars().count() >= raw.chars().count() / 2 => {
+                raw[..pos].trim_end().to_owned()
+            }
             _ => raw,
         };
         *last = Line::from(Span::styled(format!("{cut}…"), style));
