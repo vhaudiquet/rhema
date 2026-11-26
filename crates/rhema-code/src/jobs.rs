@@ -441,8 +441,7 @@ impl JobsHandle {
         sandbox: Arc<dyn Sandbox>,
         workspace: String,
         session: String,
-        helper: String,
-        helper_dir: String,
+        init: String,
         session_file: String,
     ) -> Option<Self> {
         if session.is_empty() {
@@ -464,8 +463,7 @@ impl JobsHandle {
                         sandbox,
                         workspace,
                         session: thread_session,
-                        helper,
-                        helper_dir,
+                        init,
                         session_file,
                     },
                     thread_entries,
@@ -971,14 +969,13 @@ kill "$2" 2>/dev/null"#,
 }
 
 /// What one remote poll needs: the sandbox, where its shell starts,
-/// and the installed helper's paths. A struct because the loop would
-/// otherwise carry six positional strings into every call.
+/// and the init file that defines the `job` macro. A struct because the
+/// loop would otherwise carry five positional strings into every call.
 struct RemoteJobs {
     sandbox: Arc<dyn Sandbox>,
     workspace: String,
     session: String,
-    helper: String,
-    helper_dir: String,
+    init: String,
     session_file: String,
 }
 
@@ -1027,17 +1024,14 @@ async fn remote_listing(
     stop: &AtomicBool,
 ) -> Option<(Vec<JobRow>, HashSet<String>)> {
     let tag = rhema_sandbox::exec_util::shquote(&jobs.session);
-    let dir = rhema_sandbox::exec_util::shquote(&jobs.helper_dir);
-    let bin = rhema_sandbox::exec_util::shquote(&jobs.helper);
-    // The helper runs in the sandbox's own env; the PATH prefix makes
-    // `gob` resolve beside the installed helper even when the session
-    // env does not carry the kit's PATH. The final `|| true` keeps the
-    // exec green when there is no stop record: an absent record is the
-    // normal case, not a failed poll.
+    let init = rhema_sandbox::exec_util::shquote(&jobs.init);
+    // The init file defines `job` and puts the installed `gob` on PATH.
+    // The final `|| true` keeps the exec green when there is no stop
+    // record: an absent record is the normal case, not a failed poll.
     let command = format!(
-        "PATH={dir}:$PATH; export PATH\n\
+        ". {init}\n\
          tag={tag}\n\
-         if out=$({bin} __jobs ls --json --session \"$tag\" 2>/dev/null); then\n\
+         if out=$(job ls --json --session \"$tag\" 2>/dev/null); then\n\
            printf '%s\\n' \"$out\"\n\
          else\n\
            printf '%s\\n' {failed}\n\
@@ -1049,7 +1043,6 @@ async fn remote_listing(
         marker = REMOTE_STOPPED_MARKER,
     );
     let mut env = BTreeMap::new();
-    env.insert(rhema_bash::jobs::VAR_BIN.to_owned(), jobs.helper.clone());
     env.insert(
         rhema_bash::jobs::VAR_SESSION.to_owned(),
         jobs.session.clone(),
@@ -1487,7 +1480,7 @@ esac
     }
 
     #[tokio::test]
-    async fn a_remote_listing_asks_the_sandbox_helper_and_reads_the_record() {
+    async fn a_remote_listing_sources_the_init_and_reads_the_record() {
         use rhema_sandbox::mock::ScriptedSandbox;
         let sandbox = std::sync::Arc::new(ScriptedSandbox::new());
         sandbox.push_run(Ok(rhema_sandbox::RunOutcome {
@@ -1500,15 +1493,15 @@ esac
             sandbox: sandbox.clone(),
             workspace: "/workspace".to_owned(),
             session: "s1".to_owned(),
-            helper: "/helper/rhema".to_owned(),
-            helper_dir: "/helper".to_owned(),
+            init: "/runtime/sessions/s1/init.sh".to_owned(),
             session_file: "/runtime/jobs/session".to_owned(),
         };
         let (rows, stopped) = remote_listing(&jobs, &stop).await.expect("a listing");
         assert!(rows.is_empty());
         assert!(stopped.contains("zz"));
         let command = sandbox.executed().remove(0);
-        assert!(command.contains("__jobs ls --json --session"));
+        assert!(command.contains("job ls --json --session"));
+        assert!(command.contains(". '/runtime/sessions/s1/init.sh'"));
         assert!(command.contains("rhema-jobs-$tag-stopped"));
     }
 

@@ -1134,16 +1134,28 @@ pub(crate) fn session_agent_config(
             .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
     if let Some((env, section)) = jobs {
-        kits.push(kit_for(
-            Feature::Jobs,
-            env,
-            vec![builtin_stub(
-                rhema_bash::jobs::NAME,
-                rhema_bash::jobs::VAR_BIN,
-                vec![rhema_bash::jobs::MODE],
-            )],
-            Needs::MACRO,
-        ));
+        // A sandbox drives `gob` from the init file: the helper binary
+        // is not installed for it. The host keeps the hidden mode, where
+        // the running binary is already there.
+        if sandboxed.is_some() {
+            kits.push(kit_for_shell(
+                Feature::Jobs,
+                env,
+                jobs_shell(),
+                Needs::MACRO,
+            ));
+        } else {
+            kits.push(kit_for(
+                Feature::Jobs,
+                env,
+                vec![builtin_stub(
+                    rhema_bash::jobs::NAME,
+                    rhema_bash::jobs::VAR_BIN,
+                    vec![rhema_bash::jobs::MODE],
+                )],
+                Needs::MACRO,
+            ));
+        }
         sections.insert(Feature::Jobs, section);
     }
 
@@ -1344,6 +1356,11 @@ pub(crate) fn kit_for_shell(
     needs: Needs,
 ) -> Kit {
     kit_for(feature, env, Vec::new(), needs).with_shell(shell)
+}
+
+/// The `job` macro for a sandbox: `gob` and `jq`, no helper process.
+pub(crate) fn jobs_shell() -> Shell {
+    rhema_bash::jobs::shell()
 }
 
 /// The `see` macro, the one kit whose body is shell text.

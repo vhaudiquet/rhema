@@ -96,6 +96,34 @@ fn every_job_level_event_kind_parses() {
     }
 }
 
+/// The shell macro's own body, run in a fresh bash with the fake backend
+/// on PATH. `None` when jq is absent: the macro needs it, and a test host
+/// without it cannot answer the question.
+#[cfg(unix)]
+fn shell_output(fake: &Fake, body: &str) -> Option<std::process::Output> {
+    if std::process::Command::new("jq")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return None;
+    }
+    let script = format!(
+        "{}\nexport PATH=\"{}:$PATH\"\nexport RHEMA_SESSION=s1\nexport TMPDIR=\"{}\"\n{body}\n",
+        shell().line(),
+        fake.dir.path().display(),
+        fake.dir.path().display()
+    );
+    Some(
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(fake.dir.path())
+            .output()
+            .expect("bash"),
+    )
+}
+
 /// A workspace with a fake backend: a shell script that logs every argv it
 /// gets and answers `list` from a state file. The paths are baked into the
 /// script, so no test mutates process-wide environment or cwd.
@@ -276,6 +304,26 @@ fn the_same_session_asking_again_is_told_the_id() {
     let code = call(&fake, &argv, Some("s1"));
     assert_eq!(code, 0);
     assert!(!fake.calls().contains("add"), "{}", fake.calls());
+}
+
+#[cfg(unix)]
+#[test]
+fn one_quoted_word_is_the_line_itself() {
+    // The shell hands `job run "a; b"` over as one word. Quoting it
+    // again would make `bash -c` look for a program named `a; b`.
+    let fake = Fake::new(&listing(""));
+    let argv = vec![
+        OsString::from("job"),
+        OsString::from("run"),
+        OsString::from("a; b"),
+    ];
+    let code = call(&fake, &argv, Some("s1"));
+    assert_eq!(code, 0);
+    let calls = fake.calls();
+    assert!(
+        calls.contains("add --description [s1] a; b -- bash -c a; b"),
+        "the line was quoted again: {calls}"
+    );
 }
 
 #[cfg(unix)]
@@ -560,7 +608,7 @@ fn the_state_provision_writes_no_init_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = fake_bin(dir.path());
     let state = dir.path().join("state");
-    let wiring = provision_in_dir(state, None, &bin, "no-init", false).expect("provisions");
+    let wiring = provision_in_dir(state, None, Some(&bin), "no-init", false).expect("provisions");
     assert!(!wiring.init_path.exists(), "production writes no init");
     assert!(
         !wiring.shell_env.contains_key(VAR_BASH_ENV),
@@ -934,4 +982,54 @@ fn a_wiring_without_a_tag_file_falls_back_to_the_env_var() {
         "an empty tag file is no tag"
     );
     assert_eq!(session_tag(Some(String::new()), None), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shell_macro_starts_a_line_without_the_helper() {
+    let fake = Fake::new("[]");
+    let Some(out) = shell_output(&fake, "job run npm run dev\njob ls --json") else {
+        return;
+    };
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("started new: npm run dev"), "{text}");
+    let calls = fake.calls();
+    assert!(
+        calls.contains("add --description [s1] npm run dev -- bash -c npm run dev"),
+        "{calls}"
+    );
+    let rows = text.lines().last().expect("the listing line");
+    let rows: Vec<JobRow> = serde_json::from_str(rows).expect("the listing parses");
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shell_macro_lists_the_shims_rows_as_json() {
+    let fake = Fake::new(&listing(&entry("abc", "running", "[s1] npm run dev", None)));
+    let Some(out) = shell_output(&fake, "job ls --json") else {
+        return;
+    };
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<JobRow> = serde_json::from_str(text.trim()).expect("the listing parses");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "abc");
+    assert_eq!(rows[0].status, "running");
+    assert_eq!(rows[0].command, "npm run dev");
+    assert_eq!(rows[0].session.as_deref(), Some("s1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shell_macro_records_a_self_stop() {
+    let fake = Fake::new("[]");
+    let Some(out) = shell_output(&fake, "job stop abc") else {
+        return;
+    };
+    assert!(out.status.success(), "{out:?}");
+    let record = fake.dir.path().join("rhema-jobs-s1-stopped");
+    let text = std::fs::read_to_string(record).expect("the stop record");
+    assert_eq!(text.trim(), "abc");
 }

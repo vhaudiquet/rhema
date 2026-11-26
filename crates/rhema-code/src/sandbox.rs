@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rhema_bash::ShellTools;
-use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs, Shell, Stub};
+use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs, Shell};
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_host_agent::HostAgentConfig;
@@ -467,19 +467,12 @@ pub(crate) fn remote_kit_env(
     env
 }
 
-/// The static stub set every sandbox init carries. The per-session
-/// env decides which features are available; a missing bin var makes
-/// its function say so rather than call nothing.
+/// The static kit set every sandbox init carries. The per-session env
+/// decides which features are available; a kit with no env is absent,
+/// not broken.
 fn sandbox_stub_kits() -> Vec<Kit> {
-    let stub = |name: &str, bin: &str, mode: &str| {
-        Stub::new(name, bin, vec![mode.to_owned()]).expect("a built-in kit stub")
-    };
     vec![
-        Kit::new(
-            Feature::Jobs,
-            vec![stub("job", "RHEMA_JOBS_BIN", rhema_bash::jobs::MODE)],
-            Needs::MACRO,
-        ),
+        Kit::new(Feature::Jobs, Vec::new(), Needs::MACRO).with_shell(rhema_bash::jobs::shell()),
         Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE).with_shell(
             Shell::new(rhema_bash::vision::NAME, rhema_bash::vision::SHELL_BODY)
                 .expect("the built-in vision macro is valid shell"),
@@ -844,7 +837,7 @@ impl Sandboxed {
     }
 
     /// Starts the remote jobs poller for `tag`, when this assembly has
-    /// a listing to poll: a helper, `gob` beside it, and the sandbox
+    /// a listing to poll: an init file, `gob` beside it, and the sandbox
     /// to run the listing in.
     pub(crate) fn spawn_jobs_handle(&self, tag: &str) -> Option<crate::jobs::JobsHandle> {
         // Ecrou's one-shot machines lose the daemon between commands;
@@ -865,8 +858,7 @@ impl Sandboxed {
             sandbox,
             self.workspace.clone(),
             tag.to_owned(),
-            remote.helper.clone(),
-            remote.helper_dir.clone(),
+            remote.init.clone(),
             remote.jobs_session(tag),
         )
     }

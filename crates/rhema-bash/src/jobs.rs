@@ -60,9 +60,10 @@ pub mod kind;
 /// this constant, the prompt section, and the spec text.
 pub const NAME: &str = "job";
 
-/// The hidden binary mode the init file's function execs: `rhema
-/// __jobs …`. The public interface is the function; the mode is a
-/// transport detail, like the MCP CLI's `__server`.
+/// The hidden binary mode the host init file's function execs: `rhema
+/// __jobs …`. A sandbox uses [`SHELL_BODY`] instead. The public
+/// interface is the function; the mode is a transport detail, like the
+/// MCP CLI's `__server`.
 pub const MODE: &str = "__jobs";
 
 /// The env var non-interactive bash reads its init file from. Shared with
@@ -70,7 +71,8 @@ pub const MODE: &str = "__jobs";
 /// last, its baked predecessor line reaches the others.
 pub use crate::init::VAR_BASH_ENV;
 
-/// The env var holding the binary the function execs.
+/// The env var holding the binary the host function execs. A sandbox
+/// defines [`SHELL_BODY`] and never sets it.
 pub const VAR_BIN: &str = "RHEMA_JOBS_BIN";
 
 /// The env var carrying the session id the jobs are tagged with.
@@ -108,6 +110,16 @@ pub const EXIT_NO_BACKEND: i32 = 5;
 /// the same crate-root data file the system template ships as. No
 /// trailing newline: the template interpolates the bytes verbatim.
 pub const PROMPT_SECTION: &str = include_str!("../SYSTEM_JOBS.md");
+
+/// The function body for a shell with no helper binary. It drives `gob`
+/// directly and reads its JSON with `jq`; the hidden [`MODE`] remains
+/// for the host binary, where the running process already exists.
+pub const SHELL_BODY: &str = include_str!("jobs/shell.sh");
+
+/// The `job` shell macro, for a placement that has no helper to exec.
+pub fn shell() -> crate::runtime::Shell {
+    crate::runtime::Shell::new(NAME, SHELL_BODY).expect("the jobs macro is valid shell")
+}
 
 /// The usage text `job` prints when asked, and when given a verb it does
 /// not know.
@@ -186,7 +198,7 @@ pub fn wire(bash_env: Option<OsString>, session: &str) -> Option<&'static Arc<Wi
             }
             let dir = crate::init::temp_dir("rhema-jobs").ok()?;
             let bin = std::env::current_exe().ok()?;
-            provision_in_dir(dir, bash_env, &bin, session, false)
+            provision_in_dir(dir, bash_env, Some(&bin), session, false)
                 .map(Arc::new)
                 .ok()
         })
@@ -286,7 +298,7 @@ pub fn provision_with_bin(
     session: &str,
 ) -> std::io::Result<Wiring> {
     let dir = crate::init::temp_dir("rhema-jobs")?;
-    provision_in_dir(dir, bash_env, bin, session, true)
+    provision_in_dir(dir, bash_env, Some(bin), session, true)
 }
 
 /// Provisions the state into `dir`, the shared-root placement: the
@@ -299,8 +311,7 @@ pub fn provision_with_bin(
 ///
 /// The directory or the tag file cannot be written.
 pub fn provision_shared(dir: PathBuf, session: &str) -> std::io::Result<Wiring> {
-    let bin = std::env::current_exe()?;
-    provision_in_dir(dir, None, &bin, session, false)
+    provision_in_dir(dir, None, None, session, false)
 }
 
 /// The state provision. `write_init` is the test seam: production
@@ -309,7 +320,7 @@ pub fn provision_shared(dir: PathBuf, session: &str) -> std::io::Result<Wiring> 
 fn provision_in_dir(
     dir: PathBuf,
     bash_env: Option<OsString>,
-    bin: &Path,
+    bin: Option<&Path>,
     session: &str,
     write_init: bool,
 ) -> std::io::Result<Wiring> {
@@ -322,7 +333,9 @@ fn provision_in_dir(
     } else {
         (dir.join("init.bash"), std::collections::BTreeMap::new())
     };
-    shell_env.insert(VAR_BIN.to_owned(), bin.display().to_string());
+    if let Some(bin) = bin {
+        shell_env.insert(VAR_BIN.to_owned(), bin.display().to_string());
+    }
     shell_env.insert(VAR_SESSION.to_owned(), session.to_owned());
 
     let mut wiring = Wiring {
@@ -575,12 +588,17 @@ fn run_command(args: &[OsString], backend: &Path, cwd: &Path, session: Option<&s
     };
     // The line comes apart in the shell (the function forwards the
     // model's words as argv) and goes back together here for `bash -c`
-    // to reparse: each word re-quoted, so quoting survives the trip.
-    let command = args
-        .iter()
-        .map(|arg| requote(&arg.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // to reparse. One word is already the line: `job run "a; b"` must
+    // not become a single quoted command name. Several words are
+    // re-quoted one by one, so their quoting survives the trip.
+    let command = if args.len() == 1 {
+        args[0].to_string_lossy().into_owned()
+    } else {
+        args.iter()
+            .map(|arg| requote(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let command = command.trim();
     if command.is_empty() {
         eprintln!("{NAME}: run needs a command\n\n{USAGE}");

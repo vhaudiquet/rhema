@@ -785,3 +785,22 @@ async fn a_remote_vision_pull_reads_the_staged_file_and_consumes_it() {
     assert!(executed[0].starts_with("find "), "{executed:?}");
     assert!(executed[1].starts_with("rm -f "), "{executed:?}");
 }
+
+#[test]
+fn the_static_sandbox_job_kit_drives_gob_from_shell() {
+    let kits = sandbox_stub_kits();
+    let jobs = kits
+        .iter()
+        .find(|kit| kit.feature == rhema_bash::runtime::Feature::Jobs)
+        .expect("the jobs kit");
+    assert!(
+        jobs.stubs.is_empty(),
+        "a sandbox job macro must not exec a helper"
+    );
+    assert_eq!(jobs.shells.len(), 1);
+    assert_eq!(jobs.shells[0].name, "job");
+    assert!(
+        jobs.shells[0].body.contains("gob list --json"),
+        "the macro drives gob directly"
+    );
+}

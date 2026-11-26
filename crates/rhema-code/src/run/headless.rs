@@ -255,16 +255,25 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
     if let Some((env, section)) = jobs {
-        kits.push(crate::app::kit_for(
-            rhema_bash::runtime::Feature::Jobs,
-            env,
-            vec![crate::app::builtin_stub(
-                rhema_bash::jobs::NAME,
-                rhema_bash::jobs::VAR_BIN,
-                vec![rhema_bash::jobs::MODE],
-            )],
-            rhema_bash::runtime::Needs::MACRO,
-        ));
+        if sandboxed.is_some() {
+            kits.push(crate::app::kit_for_shell(
+                rhema_bash::runtime::Feature::Jobs,
+                env,
+                crate::app::jobs_shell(),
+                rhema_bash::runtime::Needs::MACRO,
+            ));
+        } else {
+            kits.push(crate::app::kit_for(
+                rhema_bash::runtime::Feature::Jobs,
+                env,
+                vec![crate::app::builtin_stub(
+                    rhema_bash::jobs::NAME,
+                    rhema_bash::jobs::VAR_BIN,
+                    vec![rhema_bash::jobs::MODE],
+                )],
+                rhema_bash::runtime::Needs::MACRO,
+            ));
+        }
         sections.insert(rhema_bash::runtime::Feature::Jobs, section);
     }
     // The subscription is the notification feed: the one turn's driver
