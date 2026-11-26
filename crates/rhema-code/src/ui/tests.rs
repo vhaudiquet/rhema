@@ -5110,19 +5110,22 @@ fn the_resume_picker_draws_two_lines_a_session() {
                         .to_owned(),
                 ),
                 bytes: 66_403,
+                workspace: "/home/u/projects/rhema".into(),
             },
             crate::sessions::SavedSession {
                 path: "second.json".into(),
                 saved_at: now - 7_200_000,
                 snippet: None,
                 bytes: 512,
+                workspace: "/home/u/projects/rhema".into(),
             },
         ],
         now,
+        false,
     );
     let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
     terminal
-        .draw(|frame| super::dialogs::render_resume_picker(frame, &screen, &DARK))
+        .draw(|frame| super::dialogs::render_resume_picker(frame, &screen, &DARK, None))
         .unwrap();
     let buffer = terminal.backend().buffer();
     let text: Vec<String> = (0..10)
@@ -5160,4 +5163,64 @@ fn the_resume_picker_draws_two_lines_a_session() {
     );
     assert!(text[4].contains("(no preview)"), "{text:#?}");
     assert_eq!(inner(5), "2h ago · 512 B", "{text:#?}");
+}
+
+/// Across every workspace, the metadata line names the workspace
+/// before the age and size, trimmed the footer's way.
+#[test]
+fn the_all_workspaces_resume_picker_names_each_workspace() {
+    let now = 1_000_000_000_000u64;
+    let mut screen = crate::screens::ResumeScreen::new(
+        vec![crate::sessions::SavedSession {
+            path: "first.json".into(),
+            saved_at: now - 60_000,
+            snippet: Some("a prompt".to_owned()),
+            bytes: 66_403,
+            workspace: "/home/u/projects/rhema".into(),
+        }],
+        now,
+        true,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::dialogs::render_resume_picker(
+                frame,
+                &screen,
+                &DARK,
+                Some(std::path::Path::new("/home/u")),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: Vec<String> = (0..8)
+        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert!(
+        text[3].contains("projects/rhema · 1m ago · 65 KB"),
+        "the workspace precedes the facts: {text:#?}"
+    );
+    assert!(
+        text.iter().any(|row| row.contains("ctrl-a this workspace")),
+        "the footer names the way back: {text:#?}"
+    );
+
+    // The workspace gives way first when the pane is narrow.
+    screen.show_all = true;
+    let mut terminal = Terminal::new(TestBackend::new(28, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::dialogs::render_resume_picker(
+                frame,
+                &screen,
+                &DARK,
+                Some(std::path::Path::new("/home/u")),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row: String = (0..28).map(|x| buffer[(x, 3)].symbol()).collect();
+    assert!(row.contains('…'), "the workspace is the part cut: {row:?}");
+    assert!(row.contains("1m ago"), "the age survives: {row:?}");
+    assert!(row.contains("65 KB"), "the size survives: {row:?}");
 }

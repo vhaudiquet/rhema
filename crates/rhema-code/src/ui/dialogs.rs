@@ -511,6 +511,7 @@ pub(crate) fn render_resume_picker(
     frame: &mut Frame,
     screen: &crate::screens::ResumeScreen,
     theme: &Theme,
+    home: Option<&std::path::Path>,
 ) {
     let area = frame.area();
     let block = super::chrome::panel(Some("Resume a session"), theme);
@@ -554,11 +555,29 @@ pub(crate) fn render_resume_picker(
                     Line::from(Span::styled(summary, summary_style)),
                     text_width,
                 );
-                let meta = format!("{} · {}", row.age, crate::sessions::size_label(row.bytes));
-                let meta = super::model_picker::truncate_line(
-                    Line::from(Span::styled(meta, Style::default().fg(theme.text3))),
-                    text_width,
-                );
+                let meta_style = Style::default().fg(theme.text3);
+                let tail = format!("{} · {}", row.age, crate::sessions::size_label(row.bytes));
+                let meta = if screen.show_all {
+                    // The workspace comes first on the metadata line,
+                    // trimmed the footer's way. It gives up its tail
+                    // before the age and size do, so a long path never
+                    // pushes the row's facts out of the pane.
+                    let label = workspace_label(&row.workspace, home);
+                    let budget = text_width.saturating_sub(tail.width() + 3);
+                    let mut truncated = super::model_picker::truncate_line(
+                        Line::from(Span::styled(label, meta_style)),
+                        budget,
+                    );
+                    truncated
+                        .spans
+                        .push(Span::styled(format!(" · {tail}"), meta_style));
+                    super::model_picker::truncate_line(truncated, text_width)
+                } else {
+                    super::model_picker::truncate_line(
+                        Line::from(Span::styled(tail, meta_style)),
+                        text_width,
+                    )
+                };
                 ListItem::new(vec![summary, meta])
             })
             .collect();
@@ -575,11 +594,30 @@ pub(crate) fn render_resume_picker(
         );
     }
 
-    let footer = Line::from(Span::raw("enter resume · esc back").fg(theme.text3));
+    let hints = if screen.show_all {
+        "enter resume · ctrl-a this workspace · esc back"
+    } else {
+        "enter resume · ctrl-a all workspaces · esc back"
+    };
+    let footer = Line::from(Span::raw(hints).fg(theme.text3));
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
         footer_area,
     );
+}
+
+/// A workspace as the resume row's metadata line shows it: the
+/// footer's home trim and parent cap, so two workspaces read apart
+/// without a whole path spending the line.
+fn workspace_label(workspace: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    let (prefix, parents, folder) = super::footer::footer_folder(workspace, home);
+    let mut label = prefix;
+    for parent in parents {
+        label.push_str(&parent);
+        label.push('/');
+    }
+    label.push_str(&folder);
+    label
 }
 
 pub(crate) fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall, theme: &Theme) {

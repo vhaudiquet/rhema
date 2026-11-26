@@ -30,5 +30,5 @@ mod path;
 mod write;
 
 pub use file::FileStore;
-pub use layout::encode_workspace;
+pub use layout::{decode_workspace, encode_workspace};
 pub use path::PathStore;

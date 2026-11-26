@@ -381,6 +381,7 @@ impl App {
                 Vec::new()
             }
             Routed::Resume(crate::screens::ResumeAction::Pick(path)) => self.request_resume(&path),
+            Routed::Resume(crate::screens::ResumeAction::ToggleAll) => self.toggle_resume_scope(),
             Routed::Resume(crate::screens::ResumeAction::BackToChat) => {
                 self.screen = Screen::Chat;
                 Vec::new()

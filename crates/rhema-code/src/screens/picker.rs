@@ -17,6 +17,9 @@ pub struct ResumeRow {
     pub snippet: Option<String>,
     /// The saved file's byte length, shown on the metadata line.
     pub bytes: u64,
+    /// The workspace the session was saved under, shown on the
+    /// metadata line while the picker lists every workspace.
+    pub workspace: std::path::PathBuf,
 }
 
 /// What one resume-picker keypress means.
@@ -26,13 +29,15 @@ pub enum ResumeAction {
     None,
     /// Load the saved session at this path.
     Pick(std::path::PathBuf),
+    /// Show every workspace's sessions, or only this one's again.
+    ToggleAll,
     /// Return to the chat.
     BackToChat,
 }
 
 /// The resume picker: one highlighted row, arrows to move, enter to
-/// load, esc back to the chat. Sessions for one workspace only, newest
-/// first, the listing decided that before the screen existed.
+/// load, esc back to the chat, ctrl-a across workspaces. Newest first,
+/// the listing decided that before the screen existed.
 #[derive(Debug)]
 pub struct ResumeScreen {
     /// The rows, newest first.
@@ -42,12 +47,14 @@ pub struct ResumeScreen {
     /// True while the listing runs off-thread: the screen paints
     /// before the session files are read, and an Enter waits.
     pub loading: bool,
+    /// Whether the rows span every workspace, the `ctrl-a` toggle.
+    pub show_all: bool,
 }
 
 impl ResumeScreen {
     /// A picker over the saved sessions; `now` (millis) fixes the age
     /// labels.
-    pub fn new(entries: Vec<crate::sessions::SavedSession>, now: u64) -> Self {
+    pub fn new(entries: Vec<crate::sessions::SavedSession>, now: u64, show_all: bool) -> Self {
         let entries = entries
             .into_iter()
             .map(|saved| ResumeRow {
@@ -55,26 +62,39 @@ impl ResumeScreen {
                 age: crate::sessions::ago(saved.saved_at, now),
                 snippet: saved.snippet,
                 bytes: saved.bytes,
+                workspace: saved.workspace,
             })
             .collect();
         Self {
             entries,
             selected: 0,
             loading: false,
+            show_all,
         }
     }
 
     /// The screen before its listing lands: no rows, no pick.
-    pub fn loading() -> Self {
+    pub fn loading(show_all: bool) -> Self {
         Self {
             entries: Vec::new(),
             selected: 0,
             loading: true,
+            show_all,
         }
     }
 
     /// Handles one keypress.
     pub fn handle_key(&mut self, key: KeyEvent) -> ResumeAction {
+        // Ctrl-A asks for every workspace's sessions, and again for
+        // this one's. Alt-A does the same where Option sends Meta; a
+        // plain `a` stays inert, this picker has no filter.
+        if matches!(key.code, KeyCode::Char('a' | 'A'))
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT))
+        {
+            self.show_all = !self.show_all;
+            return ResumeAction::ToggleAll;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ResumeAction::None;
         }

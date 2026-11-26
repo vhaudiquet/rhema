@@ -380,20 +380,29 @@ pub fn spawn_session_resume(
 }
 
 /// Spawns the `/resume` listing on the blocking pool: the listing reads
-/// and parses every saved session in the workspace for its opening
-/// prompt, which can be hundreds of megabytes, and the picker paints
-/// before that work starts. The rows land tagged with the request, so a
+/// and parses every saved session in its scope for its opening prompt,
+/// which can be hundreds of megabytes, and the picker paints before
+/// that work starts. The rows land tagged with the request, so a
 /// listing a newer open superseded drops.
 pub fn spawn_session_listing(
     base: std::path::PathBuf,
     workspace: std::path::PathBuf,
+    all: bool,
     request: u64,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let result =
-            crate::sessions::list_sessions(&base, &workspace).map_err(|err| err.to_string());
-        let _ = events.send(UiEvent::SessionsListed { request, result });
+        let result = if all {
+            crate::sessions::list_all_sessions(&base)
+        } else {
+            crate::sessions::list_sessions(&base, &workspace)
+        }
+        .map_err(|err| err.to_string());
+        let _ = events.send(UiEvent::SessionsListed {
+            request,
+            all,
+            result,
+        });
     })
 }
 

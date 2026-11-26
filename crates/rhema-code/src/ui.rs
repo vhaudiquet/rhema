@@ -142,7 +142,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ),
         Screen::Picker(picker) => render_picker(frame, picker, icons, &theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
-        Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
+        Screen::Resume(resume) => render_resume_picker(frame, resume, &theme, app.home.as_deref()),
         Screen::Settings(settings) => render_settings(frame, settings, &theme, icons, &mut hits),
         Screen::Chat => {
             // An error wraps, so its strip grows to the wrapped height

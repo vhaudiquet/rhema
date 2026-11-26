@@ -850,14 +850,17 @@ pub enum Effect {
     /// Load this saved session off-thread for `/resume`; the parts
     /// land as `UiEvent::SessionResumed` and the app applies them.
     ResumeSession(PathBuf),
-    /// List this workspace's saved sessions off-thread; every file is
-    /// read and parsed for its opening prompt, and the picker must
-    /// paint before that runs. Lands as `UiEvent::SessionsListed`.
+    /// List saved sessions off-thread; every file is read and parsed
+    /// for its opening prompt, and the picker must paint before that
+    /// runs. Lands as `UiEvent::SessionsListed`.
     ListSessions {
         /// The session cache root.
         base: PathBuf,
-        /// The workspace whose sessions list.
+        /// The workspace whose sessions list; ignored when `all`.
         workspace: PathBuf,
+        /// Whether every workspace under `base` lists, the `ctrl-a`
+        /// scope.
+        all: bool,
         /// The request the listing answers, so a listing a newer open
         /// superseded lands stale and drops.
         request: u64,

@@ -30,6 +30,9 @@ pub struct SavedSession {
     pub snippet: Option<String>,
     /// The saved file's byte length, the picker's size hint.
     pub bytes: u64,
+    /// The workspace the session was saved under; the all-workspaces
+    /// listing shows it on the metadata line.
+    pub workspace: PathBuf,
 }
 
 /// The saved-session base: `$XDG_CACHE_HOME/rhema/sessions`, or under
@@ -149,6 +152,47 @@ pub fn write_session(path: &Path, session: &Session) -> io::Result<()> {
 /// surfaces the corruption, the listing does not hide it.
 pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSession>> {
     let store = FileStore::scoped(base, workspace);
+    rows(&store, workspace.to_path_buf())
+}
+
+/// Every saved session under `base`, across the workspace directories,
+/// newest first. A missing base is an empty list, and a stray file
+/// directly under it is not a workspace: only directories list. A
+/// directory that does not decode still lists, under its raw name, so
+/// a hand-made folder never hides its sessions.
+pub fn list_all_sessions(base: &Path) -> io::Result<Vec<SavedSession>> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let workspace = rhema_session_store_file::decode_workspace(&name)
+            .unwrap_or_else(|| PathBuf::from(&name));
+        let store = FileStore::new(entry.path());
+        out.extend(rows(&store, workspace)?);
+    }
+    out.sort_by(|a, b| {
+        b.saved_at
+            .cmp(&a.saved_at)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(out)
+}
+
+/// The picker rows one store lists under `workspace`.
+fn rows(store: &FileStore, workspace: PathBuf) -> io::Result<Vec<SavedSession>> {
     let rows = store.list().map_err(to_io)?;
     Ok(rows
         .into_iter()
@@ -162,6 +206,7 @@ pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSessi
             saved_at: meta.saved_at,
             snippet: meta.opening_prompt,
             bytes: meta.bytes,
+            workspace: workspace.clone(),
         })
         .collect())
 }
@@ -287,6 +332,27 @@ mod tests {
         save_session(&base, Path::new("/a_b"), &session_with("two")).unwrap();
         assert_eq!(list_sessions(&base, Path::new("/a/b")).unwrap().len(), 1);
         assert_eq!(list_sessions(&base, Path::new("/a_b")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn listing_all_workspaces_reads_every_directory() {
+        let (_dir, base) = temp_base();
+        let first = Path::new("/home/u/one");
+        let second = Path::new("/home/u/two");
+        save_session(&base, first, &session_with("from one")).unwrap();
+        save_session(&base, second, &session_with("from two")).unwrap();
+
+        let mut listed = list_all_sessions(&base).unwrap();
+        listed.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].workspace, first);
+        assert_eq!(listed[0].snippet.as_deref(), Some("from one"));
+        assert_eq!(listed[1].workspace, second);
+        assert_eq!(listed[1].snippet.as_deref(), Some("from two"));
+
+        // The unscoped listing still lists only its own workspace.
+        assert_eq!(list_sessions(&base, first).unwrap().len(), 1);
+        assert!(list_all_sessions(&base.join("missing")).unwrap().is_empty());
     }
 
     #[test]

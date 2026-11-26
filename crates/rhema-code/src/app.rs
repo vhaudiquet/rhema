@@ -261,6 +261,9 @@ pub struct App {
     /// The last listing id handed out, so a reopening screen never
     /// mistakes an older listing for its own.
     resume_list_seq: u64,
+    /// The cache root the open picker lists, so `ctrl-a` can list the
+    /// same root across every workspace.
+    resume_base: Option<std::path::PathBuf>,
     /// A rebuild a running turn's checkout ate, with the stamp it
     /// asked for: mid-turn settings toggles promised their rebuild
     /// for the turn's end, and only the turn's finish runs it — the
@@ -724,6 +727,7 @@ impl App {
             resume_pending: None,
             resume_listing: None,
             resume_list_seq: 0,
+            resume_base: None,
             update: crate::screens::UpdatePage::default(),
             logo_rect: None,
             bubble_pieces: Vec::new(),

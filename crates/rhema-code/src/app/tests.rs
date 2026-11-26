@@ -5638,6 +5638,67 @@ fn a_superseded_session_listing_lands_stale_and_drops() {
 }
 
 #[test]
+fn ctrl_a_lists_every_workspace_and_ctrl_a_again_narrows_it() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let base = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(&h.app.options.workspace).unwrap();
+    let other = Path::new("/some/other/workspace");
+    crate::sessions::save_session(base.path(), &workspace, &session_of("here")).unwrap();
+    crate::sessions::save_session(base.path(), other, &session_of("there")).unwrap();
+
+    let listing = h.app.open_resume_from(base.path());
+    deliver_listing(&mut h, listing);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(!resume.show_all);
+            assert_eq!(resume.entries.len(), 1, "one workspace at first");
+        }
+        _other => panic!("expected the resume picker"),
+    }
+
+    // Ctrl-A asks for every workspace's sessions.
+    let listing = h.app.on_key(ctrl('a'));
+    assert!(
+        matches!(listing.as_slice(), [Effect::ListSessions { all: true, .. }]),
+        "ctrl-a re-lists across workspaces: {listing:?}"
+    );
+    deliver_listing(&mut h, listing);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(resume.show_all);
+            assert_eq!(resume.entries.len(), 2);
+            assert!(
+                resume.entries.iter().any(|row| row.workspace == workspace),
+                "the current workspace is among them"
+            );
+            assert!(
+                resume.entries.iter().any(|row| row.workspace == other),
+                "so is the other one"
+            );
+        }
+        _other => panic!("expected the resume picker"),
+    }
+
+    // Ctrl-A again narrows back to this workspace.
+    let listing = h.app.on_key(ctrl('a'));
+    assert!(
+        matches!(
+            listing.as_slice(),
+            [Effect::ListSessions { all: false, .. }]
+        ),
+        "ctrl-a toggles back: {listing:?}"
+    );
+    deliver_listing(&mut h, listing);
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(!resume.show_all);
+            assert_eq!(resume.entries.len(), 1);
+        }
+        _other => panic!("expected the resume picker"),
+    }
+}
+
+#[test]
 fn leaving_the_picker_while_it_lists_drops_the_landing() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let base = tempfile::tempdir().unwrap();
@@ -5655,15 +5716,27 @@ fn leaving_the_picker_while_it_lists_drops_the_landing() {
 }
 
 #[test]
-fn slash_resume_with_nothing_saved_is_a_notice() {
+fn slash_resume_with_nothing_saved_opens_the_picker_so_ctrl_a_can_widen_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let base = tempfile::tempdir().unwrap();
     let listing = h.app.open_resume_from(base.path());
     deliver_listing(&mut h, listing);
-    assert!(matches!(h.app.screen, Screen::Chat), "no picker opens");
+    match &h.app.screen {
+        Screen::Resume(resume) => {
+            assert!(!resume.loading);
+            assert!(!resume.show_all);
+            assert!(resume.entries.is_empty());
+        }
+        _other => panic!("an empty workspace keeps the picker open"),
+    }
+
+    // Ctrl-A widens it; nothing anywhere is still a notice.
+    let listing = h.app.on_key(ctrl('a'));
+    deliver_listing(&mut h, listing);
+    assert!(matches!(h.app.screen, Screen::Chat));
     assert!(matches!(
         h.app.transcript.lines().last(),
-        Some(Line::Notice(text)) if text.contains("no saved sessions")
+        Some(Line::Notice(text)) if text.contains("no saved sessions in any workspace")
     ));
 }
 
@@ -5680,15 +5753,22 @@ fn deliver_listing(h: &mut Harness, effects: Vec<Effect>) {
         Effect::ListSessions {
             base,
             workspace,
+            all,
             request,
         },
     ] = effects.as_slice()
     else {
         panic!("expected the listing effect: {effects:?}");
     };
-    let result = crate::sessions::list_sessions(base, workspace).map_err(|err| err.to_string());
+    let result = if *all {
+        crate::sessions::list_all_sessions(base)
+    } else {
+        crate::sessions::list_sessions(base, workspace)
+    }
+    .map_err(|err| err.to_string());
     h.app.on_event(UiEvent::SessionsListed {
         request: *request,
+        all: *all,
         result,
     });
 }

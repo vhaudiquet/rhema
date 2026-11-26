@@ -121,7 +121,7 @@ The add dialog offers **Mistral API** for a pay-as-you-go or plan API key from `
 
 ### Saved sessions
 
-Every conversation checkpoints to disk as turns stream, through the same store ACP and `--save` use (`rhema-session-store-file`): one bare-JSON `Session` per file, written to a private temp file, fsynced, and renamed over the previous checkpoint. A crash mid-turn leaves the last committed boundary, never a half file. `/resume` lists the workspace's saved sessions from `<cache>/rhema/sessions/<encoded-workspace>/`, newest first, and shows each one's opening prompt.
+Every conversation checkpoints to disk as turns stream, through the same store ACP and `--save` use (`rhema-session-store-file`): one bare-JSON `Session` per file, written to a private temp file, fsynced, and renamed over the previous checkpoint. A crash mid-turn leaves the last committed boundary, never a half file. `/resume` lists the workspace's saved sessions from `<cache>/rhema/sessions/<encoded-workspace>/`, newest first, and shows each one's opening prompt, age and size. `ctrl-a` widens the list to every workspace, naming each row's workspace on its metadata line; `ctrl-a` again narrows it back.
 
 ### Skills, sessions, etc.
 

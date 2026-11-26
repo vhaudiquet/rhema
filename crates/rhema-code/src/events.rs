@@ -311,8 +311,9 @@ pub enum UiEvent {
         /// The open request this answers; a listing a newer open
         /// superseded is stale and drops.
         request: u64,
-        /// The rows for this workspace, newest first, or why the
-        /// listing failed.
+        /// Whether the rows span every workspace, the `ctrl-a` scope.
+        all: bool,
+        /// The rows, newest first, or why the listing failed.
         result: Result<Vec<crate::sessions::SavedSession>, String>,
     },
     /// A `/resume` pick finished loading off-thread. The session file

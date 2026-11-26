@@ -200,7 +200,9 @@ impl App {
     }
 
     /// Opens the resume picker over the sessions saved for this
-    /// workspace. An empty history of saves is a notice, not a screen.
+    /// workspace. An empty workspace still opens it, so `ctrl-a` can
+    /// reach the sessions saved elsewhere; only an empty all-workspaces
+    /// listing is a notice.
     pub fn open_resume(&mut self) -> Vec<Effect> {
         match crate::sessions::base_dir() {
             Ok(base) => self.open_resume_from(&base),
@@ -219,6 +221,29 @@ impl App {
     /// and the paint must not wait for that. The rows land as
     /// [`UiEvent::SessionsListed`] for [`Self::land_sessions_listed`].
     pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
+        self.resume_base = Some(base.to_path_buf());
+        self.start_resume_listing(base, false)
+    }
+
+    /// Switches the open picker between this workspace's sessions and
+    /// every workspace's, re-listing off-thread. The screen already
+    /// flipped its [`crate::screens::ResumeScreen::show_all`] flag in
+    /// the key handler, so the listing follows it.
+    pub fn toggle_resume_scope(&mut self) -> Vec<Effect> {
+        let all = match &self.screen {
+            Screen::Resume(resume) => resume.show_all,
+            _ => return Vec::new(),
+        };
+        let Some(base) = self.resume_base.clone() else {
+            return Vec::new();
+        };
+        self.start_resume_listing(&base, all)
+    }
+
+    /// The one listing path: a fresh request id, a loading screen in
+    /// the scope the caller names, and the read handed to the blocking
+    /// pool.
+    fn start_resume_listing(&mut self, base: &Path, all: bool) -> Vec<Effect> {
         if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /resume waits for it to finish");
@@ -227,10 +252,11 @@ impl App {
         self.resume_list_seq = self.resume_list_seq.wrapping_add(1);
         let request = self.resume_list_seq;
         self.resume_listing = Some(request);
-        self.screen = Screen::Resume(crate::screens::ResumeScreen::loading());
+        self.screen = Screen::Resume(crate::screens::ResumeScreen::loading(all));
         vec![Effect::ListSessions {
             base: base.to_path_buf(),
             workspace: crate::args::canonical(&self.options.workspace),
+            all,
             request,
         }]
     }
@@ -242,6 +268,7 @@ impl App {
     pub(crate) fn land_sessions_listed(
         &mut self,
         request: u64,
+        all: bool,
         result: Result<Vec<crate::sessions::SavedSession>, String>,
     ) {
         if self.resume_listing != Some(request) {
@@ -252,15 +279,21 @@ impl App {
             return;
         }
         match result {
-            Ok(entries) if entries.is_empty() => {
+            // An empty all-workspaces listing has nowhere to widen to
+            // and closes. An empty workspace listing still opens: the
+            // picker's `ctrl-a` is how a fresh workspace reaches the
+            // sessions saved elsewhere, so the screen cannot close
+            // before that key can be pressed.
+            Ok(entries) if entries.is_empty() && all => {
                 self.screen = Screen::Chat;
                 self.transcript
-                    .push_notice("no saved sessions for this directory");
+                    .push_notice("no saved sessions in any workspace");
             }
             Ok(entries) => {
                 self.screen = Screen::Resume(crate::screens::ResumeScreen::new(
                     entries,
                     crate::sessions::now_millis(),
+                    all,
                 ));
             }
             Err(err) => {

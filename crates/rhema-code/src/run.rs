@@ -1074,9 +1074,10 @@ fn dispatch(
         Effect::ListSessions {
             base,
             workspace,
+            all,
             request,
         } => {
-            spawn_session_listing(base, workspace, request, tx.clone());
+            spawn_session_listing(base, workspace, all, request, tx.clone());
         }
         Effect::CheckForUpdates => {
             spawn_update_check(tx.clone());
