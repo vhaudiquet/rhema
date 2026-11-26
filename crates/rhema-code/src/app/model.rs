@@ -931,6 +931,9 @@ impl App {
         stats: Option<rhema_transcript::TranscriptStats>,
         sections: Vec<rhema_transcript::Section>,
     ) -> Result<(), String> {
+        // The old handle's steps land before the catalog that prices
+        // them can change under the rebuild.
+        self.account_subagent_spend();
         let (mut agent, subagents, missing) =
             self.build_agent(session).map_err(|err| err.to_string())?;
         if let Some(stats) = &stats {

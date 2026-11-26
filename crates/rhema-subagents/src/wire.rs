@@ -100,6 +100,14 @@ impl SubagentHandle {
         self.registry.status()
     }
 
+    /// Takes the spend the frontend has not priced yet: per model id,
+    /// the tokens the jobs' steps added since the previous take. The
+    /// frontend prices each entry by that model's card and adds the
+    /// result to the session's cost. Empty after a drain.
+    pub fn take_spend(&self) -> Vec<(String, rhema_core::Usage)> {
+        self.registry.take_spend()
+    }
+
     /// The finish events, oldest first, one per job, exactly once per
     /// job. The transcript notice feed: a frontend pushes each event's
     /// `line` the moment the job ends, whatever turn is running.

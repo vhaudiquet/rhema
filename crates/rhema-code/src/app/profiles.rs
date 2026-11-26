@@ -309,6 +309,9 @@ impl App {
                 self.session_profile = Some(name.to_owned());
                 self.backend = Some(backend.clone());
                 self.provider = Some(provider);
+                // The profile's cards replace the catalog: price the
+                // outgoing handle's steps before they go.
+                self.account_subagent_spend();
                 self.models.clear();
                 self.agent = Some(agent);
                 // The catalog was cleared too: the new profile's card,

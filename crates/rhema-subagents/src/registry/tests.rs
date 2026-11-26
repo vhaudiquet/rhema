@@ -424,6 +424,90 @@ fn a_running_job_reports_phase_context_and_spend() {
 }
 
 #[test]
+fn a_jobs_spend_bills_only_its_growth() {
+    let registry = registry();
+    let job = registry.mint("scout");
+    registry.mark_running(&job.id, Some("worker-model".into()));
+    let status = |input: u32, output: u32| rhema_core::ToolStatus {
+        phase: "running".to_owned(),
+        context: None,
+        spent: Some(Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cached_input_tokens: 0,
+        }),
+        model: None,
+    };
+    registry.report(&job.id, &status(200, 20));
+    assert_eq!(
+        registry.take_spend(),
+        vec![(
+            "worker-model".to_owned(),
+            Usage {
+                input_tokens: 200,
+                output_tokens: 20,
+                cached_input_tokens: 0,
+            }
+        )],
+        "the first figure is the job's whole spend"
+    );
+    // A repeated status is the same cumulative figure, not a second
+    // bill.
+    registry.report(&job.id, &status(200, 20));
+    assert!(registry.take_spend().is_empty());
+    // Growth alone bills.
+    registry.report(&job.id, &status(350, 45));
+    assert_eq!(
+        registry.take_spend(),
+        vec![(
+            "worker-model".to_owned(),
+            Usage {
+                input_tokens: 150,
+                output_tokens: 25,
+                cached_input_tokens: 0,
+            }
+        )]
+    );
+}
+
+#[test]
+fn a_restarted_job_bills_its_rerun_afresh() {
+    let registry = registry();
+    let job = registry.mint("scout");
+    arm(&registry, &job.id);
+    registry.mark_running(&job.id, Some("worker-model".into()));
+    let status = rhema_core::ToolStatus {
+        phase: "running".to_owned(),
+        context: None,
+        spent: Some(Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 0,
+        }),
+        model: None,
+    };
+    registry.report(&job.id, &status);
+    assert_eq!(registry.take_spend().len(), 1);
+    registry.finish(&job.id, Err(JobFailure::Transient("network".to_owned())));
+    assert_eq!(registry.restart_failed().len(), 1);
+    // The re-run's spend starts from zero: its first report is its own
+    // bill, not a delta against the failed run's total.
+    registry.mark_running(&job.id, Some("worker-model".into()));
+    registry.report(&job.id, &status);
+    assert_eq!(
+        registry.take_spend(),
+        vec![(
+            "worker-model".to_owned(),
+            Usage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cached_input_tokens: 0,
+            }
+        )]
+    );
+}
+
+#[test]
 fn status_and_notifications_come_out_oldest_first() {
     let registry = registry();
     let first = registry.mint("alpha");

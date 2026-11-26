@@ -11,6 +11,10 @@ impl App {
     /// file of its own instead of overwriting that history (see
     /// [`Self::ensure_checkpoint_target`]).
     pub fn clear_session(&mut self) {
+        // The delegates' unpriced steps land on the outgoing total
+        // before it is backed up and zeroed: they belong to the
+        // conversation that is ending.
+        self.account_subagent_spend();
         // The backup lands before the history clears: a clear is a
         // conversation boundary the user asked for, not a discard.
         let backup = self.back_up_session();

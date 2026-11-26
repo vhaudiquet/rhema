@@ -9297,6 +9297,105 @@ async fn a_delivered_subagent_finish_settles_before_the_save() {
     );
 }
 
+/// A delegate's step is a billed model call like any other: the
+/// registry reports its spend, and the tick prices it by the
+/// delegate's own card into the session total.
+#[tokio::test]
+async fn a_subagents_spend_lands_in_the_session_cost() {
+    use rhema_core::{EventSink, ProviderError};
+    use rhema_session_store::SessionId;
+
+    /// Answers one report and bills a million prompt tokens for it.
+    struct Metered;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Metered {
+        async fn complete(
+            &self,
+            _req: rhema_core::ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<rhema_core::ModelOutput, ProviderError> {
+            Ok(rhema_core::ModelOutput {
+                message: Message::text(Role::Assistant, "the report"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 0,
+                    cached_input_tokens: 0,
+                },
+            })
+        }
+    }
+
+    let mut h = harness(Some("key"), Some("m"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded(
+            "google",
+            vec![priced_model(
+                "m",
+                rhema_provider::Pricing {
+                    input_per_mtok: 2.0,
+                    output_per_mtok: 8.0,
+                    cached_input_per_mtok: None,
+                },
+            )],
+        ),
+    });
+    let workspace = crate::args::canonical(&h.app.options.workspace);
+    let store = rhema_session_store_file::FileStore::scoped(h.sessions.path(), &workspace);
+    let parent = SessionId::new(h.app.jobs_tag.clone()).unwrap();
+    let tools = {
+        let shell = Arc::new(rhema_host_agent::ShellTools::new(std::env::temp_dir()));
+        let def = rhema_subagents::SubagentDef {
+            name: "scout".into(),
+            description: "looks around".into(),
+            model: None,
+            max_steps: None,
+            body: "Look.".into(),
+        };
+        Arc::new(rhema_subagents::SubagentTools::new(
+            Arc::new(Metered),
+            vec![def],
+            shell,
+            "m",
+        ))
+    };
+    tools.attach_store(Arc::new(store.clone()), parent.clone());
+    h.app.subagents = Some(tools.handle());
+    let _ = rhema_core::ToolResolver::resolve(
+        tools.as_ref(),
+        ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({"name": "scout", "prompt": "look"}),
+            ..ToolCall::default()
+        },
+        &rhema_core::ToolContext::default(),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !h.app.subagents.as_ref().unwrap().status().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the job never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        h.app.session_cost, 0.0,
+        "the report sits in the registry until a tick prices it"
+    );
+    h.app.on_tick();
+    // One million prompt tokens at $2/M: the delegate's step.
+    assert!(
+        (h.app.session_cost - 2.0).abs() < 1e-9,
+        "the session cost carries the subagent's spend: {}",
+        h.app.session_cost
+    );
+}
+
 #[test]
 fn adding_a_decision_model_places_its_key_and_persists() {
     let mut h = harness_with_secrets(None, None, Session::default());

@@ -308,6 +308,10 @@ struct Job {
     cancel: Arc<AtomicBool>,
     started_at: Instant,
     state: State,
+    /// The job's cumulative spend already folded into the registry's
+    /// pending total. A repeated status bills nothing more; a restart
+    /// clears it, the re-run's spend starts from zero.
+    billed: Option<Usage>,
     /// The spawn ingredients a restart needs; armed at start, kept
     /// across restarts so a re-run that fails transiently can restart
     /// again.
@@ -355,6 +359,10 @@ struct RegistryInner {
     /// fetched) that lets the ledger's record settle. Drained by the
     /// frontend beside its session writes.
     settled: Vec<Settled>,
+    /// Spend the frontend has not priced yet, per model id: each job's
+    /// growth since its last billed status. Drained by
+    /// [`Registry::take_spend`].
+    spend: BTreeMap<String, Usage>,
 }
 
 impl Registry {
@@ -370,6 +378,7 @@ impl Registry {
                 starts: Vec::new(),
                 extra: Vec::new(),
                 settled: Vec::new(),
+                spend: BTreeMap::new(),
             }),
             permits: Arc::new(tokio::sync::Semaphore::new(max_running.max(1))),
         }
@@ -399,6 +408,7 @@ impl Registry {
                 cancel: cancel.clone(),
                 started_at: Instant::now(),
                 state: State::Queued,
+                billed: None,
                 rerun: None,
             },
         );
@@ -458,23 +468,50 @@ impl Registry {
 
     /// Folds one [`rhema_core::ToolStatus`] from the job's inner turn
     /// into its record. Only a running job changes: a finished one
-    /// keeps its last state.
+    /// keeps its last state. A spend figure adds its growth since the
+    /// job's last report to the pending total, so a frontend can price
+    /// what the delegate's steps billed.
     pub(crate) fn report(&self, id: &str, status: &rhema_core::ToolStatus) {
         let mut inner = self.lock();
-        if let Some(job) = inner.jobs.get_mut(id)
-            && let State::Running {
+        let mut billed = None;
+        if let Some(job) = inner.jobs.get_mut(id) {
+            let previous = job.billed.unwrap_or_default();
+            if let State::Running {
                 phase,
                 context,
                 spent,
                 model,
             } = &mut job.state
-        {
-            *phase = status.phase.clone();
-            *context = status.context;
-            *spent = status.spent;
-            if status.model.is_some() {
-                *model = status.model.clone();
+            {
+                *phase = status.phase.clone();
+                *context = status.context;
+                if let Some(total) = status.spent {
+                    let delta = Usage {
+                        input_tokens: total.input_tokens.saturating_sub(previous.input_tokens),
+                        output_tokens: total.output_tokens.saturating_sub(previous.output_tokens),
+                        cached_input_tokens: total
+                            .cached_input_tokens
+                            .saturating_sub(previous.cached_input_tokens),
+                    };
+                    *spent = Some(total);
+                    job.billed = Some(total);
+                    if delta != Usage::default() {
+                        let model = status.model.clone().or_else(|| model.clone());
+                        billed = Some((model.unwrap_or_default(), delta));
+                    }
+                }
+                if status.model.is_some() {
+                    *model = status.model.clone();
+                }
             }
+        }
+        if let Some((model, delta)) = billed {
+            let total = inner.spend.entry(model).or_default();
+            total.input_tokens = total.input_tokens.saturating_add(delta.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(delta.output_tokens);
+            total.cached_input_tokens = total
+                .cached_input_tokens
+                .saturating_add(delta.cached_input_tokens);
         }
     }
 
@@ -616,6 +653,14 @@ impl Registry {
         std::mem::take(&mut self.lock().settled)
     }
 
+    /// Takes the spend the frontend has not priced yet: per model id,
+    /// the tokens every job's steps added since the previous take. A
+    /// frontend prices each entry by that model's card and adds the
+    /// result to the session's cost. Empty after a drain.
+    pub fn take_spend(&self) -> Vec<(String, Usage)> {
+        std::mem::take(&mut self.lock().spend).into_iter().collect()
+    }
+
     /// Takes the finish events out, oldest first, one per job,
     /// exactly once. The transcript notice feed: a frontend pushes
     /// each event's `line` when the job ends, whatever turn is
@@ -684,6 +729,7 @@ impl Registry {
                 job.cancel = cancel.clone();
                 job.started_at = Instant::now();
                 job.state = State::Queued;
+                job.billed = None;
                 Some(RestartJob {
                     id,
                     name: job.name.clone(),

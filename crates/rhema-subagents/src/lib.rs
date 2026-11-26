@@ -22,8 +22,9 @@
 //! still fails, in place, under its own id (see
 //! [`registry::JobFailure`]). The registry is also the read surfaces:
 //! the status subscription the UI renders one working line per job
-//! from, the finish feed a frontend turns into transcript notices, and
-//! the notifications, the driver drains them at step boundaries while
+//! from, the spend feed a frontend prices into its session cost, the
+//! finish feed a frontend turns into transcript notices, and the
+//! notifications, the driver drains them at step boundaries while
 //! a turn runs, and a frontend with no running turn takes them to run
 //! as the next turn's prompt. Jobs are bound to the agent's lifetime,
 //! dropped with it. When the frontend attached a store, each job also

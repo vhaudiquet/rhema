@@ -165,8 +165,9 @@ pub struct App {
     /// hit rate the providers reported.
     pub transcript_stats: Option<rhema_transcript::TranscriptStats>,
     /// Accumulated cost of the session in USD, summed per model call
-    /// from the current model's pricing; calls on unpriced models add
-    /// nothing.
+    /// from the pricing of the model that made it: the parent's steps
+    /// and the background subagents' steps both count. Calls on
+    /// unpriced models add nothing.
     pub session_cost: f64,
     /// The last turn's error, shown in the status line until the next
     /// submit.

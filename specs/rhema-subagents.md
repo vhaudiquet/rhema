@@ -264,8 +264,9 @@ subagents on its own.
 
 ## 7. Explicitly not decided here
 
-- Usage accounting: a subagent's token spend is invisible to the parent's
-  totals in v1.
+- Usage accounting in the core: a subagent's token spend never rides the
+  parent's event stream. A frontend prices the registry's reported spend
+  into its own session cost, and rhema-code does.
 - A `--no-subagents` flag or per-workspace opt-out.
 - Subagent definitions read from anything but the two directories.
 
