@@ -237,13 +237,7 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some()
-                    || settings.add_profile.is_some()
-                    || settings.mcp_dialog.is_some()
-                    || settings.mcp_confirm.is_some()
-                    || settings.instance_confirm.is_some()
-                    || settings.profile_confirm.is_some()
-                {
+                if settings.modal_open() {
                     // A dialog is modal: clicks behind it do nothing.
                     return Vec::new();
                 }
@@ -259,14 +253,9 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some()
-                    || settings.add_profile.is_some()
-                    || settings.sandbox_dialog.is_some()
-                    || settings.mcp_dialog.is_some()
-                    || settings.mcp_confirm.is_some()
-                    || settings.instance_confirm.is_some()
-                    || settings.profile_confirm.is_some()
-                {
+                if settings.modal_open() {
+                    // The whole set, not a list that drifts from the
+                    // sidebar's.
                     return Vec::new();
                 }
                 settings.select_row(index);

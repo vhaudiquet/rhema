@@ -533,6 +533,26 @@ impl Default for SettingsScreen {
 }
 
 impl SettingsScreen {
+    /// Whether any dialog or removal confirmation is up.
+    ///
+    /// Every one is modal: a click behind it does nothing, and both the
+    /// sidebar and the page rows consult this one list. Two hand-kept
+    /// lists drifted, and the pages behind the web search, decision, and
+    /// sandbox dialogs answered clicks that landed on them.
+    pub fn modal_open(&self) -> bool {
+        self.dialog.is_some()
+            || self.add_profile.is_some()
+            || self.sandbox_dialog.is_some()
+            || self.mcp_dialog.is_some()
+            || self.mcp_confirm.is_some()
+            || self.websearch_dialog.is_some()
+            || self.websearch_confirm.is_some()
+            || self.decision_dialog.is_some()
+            || self.decision_confirm.is_some()
+            || self.instance_confirm.is_some()
+            || self.profile_confirm.is_some()
+    }
+
     /// A settings screen on the Providers page: dark theme, plain
     /// icons, empty snapshots, the opener fills the rest.
     pub fn new() -> Self {
