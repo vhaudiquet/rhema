@@ -219,7 +219,11 @@ impl Agent {
             .collect();
         session.history.push(out.message.clone());
 
-        if out.stop_reason == StopReason::ToolUse {
+        // A `ToolUse` stop with no assembled call has nothing to run.
+        // Stepping again would spend one request per iteration on an
+        // answer the provider never finished, and the next loop turn
+        // would ask the model to answer calls that are not there.
+        if out.stop_reason == StopReason::ToolUse && !call_indices.is_empty() {
             if let Some(commit) = &self.commit {
                 // Commit-before-execute: the intent is durable before the
                 // first side effect, or nothing runs.
@@ -242,7 +246,14 @@ impl Agent {
                 // resolver knows only its own progress lines; its status
                 // rides the same stamp. The stamp's borrow ends with the
                 // call, before the result event.
-                let result = {
+                // A cancelled turn stops between calls, not only inside
+                // one: the resolver polls the flag for a call in flight,
+                // this covers the calls queued behind it, and each still
+                // gets a result so the next request stays valid.
+                let cancelled = ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed);
+                let result = if cancelled {
+                    ToolResult::failure(&call.id, "cancelled before the call ran")
+                } else {
                     let mut progress = CallProgress {
                         id: call.id.clone(),
                         events: &mut events,
@@ -479,7 +490,9 @@ pub fn close_orphaned_calls(history: &mut Vec<Message>) -> Vec<String> {
     let results = dangling_calls(history).into_iter().map(|call| {
         ToolResult::failure(
             &call.id,
-            "the turn was interrupted before this call ran; nothing happened",
+            "interrupted: the turn ended before this call's result landed; \
+             its effect may have partially applied, verify state before \
+             retrying",
         )
     });
     insert_missing(history, results)
@@ -589,9 +602,12 @@ fn insert_missing(
             .map(|(position, id)| (id.as_str(), position))
             .collect();
         for id in missing {
-            let result = results
-                .next()
-                .expect("one result per dangling call, in call order");
+            // The two scans agree today; a caller that hands fewer
+            // results than there are dangling calls still gets one per
+            // call, named, instead of a panic in the middle of a repair.
+            let result = results.next().unwrap_or_else(|| {
+                ToolResult::failure(id, "the interrupted call was not repaired")
+            });
             let call_rank = rank[id.as_str()];
             let mut insert_at = index + 1;
             for (offset, message) in history[index + 1..block_end].iter().enumerate() {
@@ -683,7 +699,9 @@ pub async fn run_turn(
     session.history.push(input);
     let mut step = agent.step(session, sink, ctx).await?;
     let mut remaining = max_iterations.get() - 1;
-    while step.output.stop_reason == StopReason::ToolUse && remaining > 0 {
+    // `ran_tools` keeps a provider that stopped on `ToolUse` without
+    // assembling a call from spending every remaining iteration on it.
+    while step.output.stop_reason == StopReason::ToolUse && step.ran_tools() && remaining > 0 {
         step = agent.step(session, sink, ctx).await?;
         remaining -= 1;
     }

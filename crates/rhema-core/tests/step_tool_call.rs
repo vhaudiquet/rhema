@@ -531,3 +531,81 @@ async fn a_failing_commit_before_a_tool_fails_the_step_with_nothing_run() {
     assert_eq!(session.history[1].role, Role::Assistant);
     assert!(log.entries().is_empty());
 }
+
+#[tokio::test]
+async fn a_tool_use_stop_with_no_call_ends_the_turn() {
+    // A provider that stops on `ToolUse` without assembling a call has
+    // nothing for another request to answer. One scripted reply is all
+    // the mock holds: a second step would come back `Exhausted`.
+    let mut agent = Agent::builder()
+        .provider(Arc::new(MockProvider::new(vec![ModelOutput {
+            message: Message::text(Role::Assistant, ""),
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        }])))
+        .resolver(Arc::new(EchoResolver))
+        .build()
+        .unwrap();
+    let mut session = Session::default();
+    let mut sink = RecordSink::default();
+
+    let out = agent
+        .turn("go", &mut session, &mut sink, &ToolContext::default())
+        .await
+        .unwrap();
+
+    assert_eq!(out.stop_reason, StopReason::ToolUse);
+    assert_eq!(session.history.len(), 2, "one exchange, no tool result");
+}
+
+#[tokio::test]
+async fn a_cancelled_context_runs_no_further_calls() {
+    // Two calls in one message, the flag already set: the queued calls
+    // are answered in band so the history stays valid, and none runs.
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    #[rhema_core::async_trait]
+    impl ToolResolver for Counting {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec::new("echo", "echo", json!({ "type": "object" }))]
+        }
+
+        async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ToolResult::success(call.id, "ran")
+        }
+    }
+
+    let resolver = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+    let mut agent = Agent::builder()
+        .provider(Arc::new(MockProvider::new(vec![ModelOutput {
+            message: Message {
+                annotations: Default::default(),
+                role: Role::Assistant,
+                content: vec![
+                    Content::ToolCall(call("call_1", "echo", json!({}))),
+                    Content::ToolCall(call("call_2", "echo", json!({}))),
+                ],
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        }])))
+        .resolver(Arc::clone(&resolver) as Arc<dyn ToolResolver>)
+        .build()
+        .unwrap();
+    let mut session = Session::default();
+    let mut sink = RecordSink::default();
+    let ctx = ToolContext::default();
+    ctx.cancelled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    agent.step(&mut session, &mut sink, &ctx).await.unwrap();
+
+    assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(session.history.len(), 3, "one result per call");
+    for message in &session.history[1..] {
+        let result = tool_result_of(message);
+        assert!(result.is_error);
+        assert_eq!(result.content, "cancelled before the call ran");
+    }
+}

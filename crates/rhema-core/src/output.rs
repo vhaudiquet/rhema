@@ -50,3 +50,18 @@ pub struct Step {
     /// The model output this step produced.
     pub output: ModelOutput,
 }
+
+impl Step {
+    /// Whether this step ran any tool call. A provider can stop on
+    /// [`StopReason::ToolUse`] without assembling a call, a `[DONE]`
+    /// with no fragment, a dropped stream; such a step has nothing for
+    /// another request to answer, and the turn loops check this so they
+    /// do not spend a request per iteration on it.
+    pub fn ran_tools(&self) -> bool {
+        self.output
+            .message
+            .content
+            .iter()
+            .any(|content| matches!(content, crate::message::Content::ToolCall(_)))
+    }
+}
