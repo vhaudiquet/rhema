@@ -201,14 +201,15 @@ pub fn spawn_turn(
                     // stays load-bearing without a repair step here.
                     text = nudge;
                 }
-                result = &mut turn => match steer.try_recv() {
-                    // A message that raced the completion steers the next
-                    // turn instead of slipping into the closing window.
-                    Ok(nudge) => text = nudge,
-                    Err(_) => {
-                        outcome = Some(result);
-                        break;
-                    }
+                result = &mut turn => {
+                    // A message that raced the completion stays in the
+                    // channel: it rides `TurnFinished` back to the app,
+                    // which queues it as the next prompt. Taking it here
+                    // ran another whole turn inside this task and threw
+                    // the finished turn's result away with it, so the app
+                    // never saw that turn's usage, error, or stop reason.
+                    outcome = Some(result);
+                    break;
                 },
             }
         }
