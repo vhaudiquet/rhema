@@ -119,6 +119,10 @@ impl Sandbox for LocalSandbox {
             .current_dir(cwd)
             .envs(exec_util::NONINTERACTIVE_ENV.iter().copied())
             .envs(request.env.iter())
+            // The terminal's resume token stops at the sandbox seam: the
+            // command runs as this user and could otherwise register a
+            // record the terminal later runs unattended.
+            .env_remove(exec_util::OSC7577_TOKEN)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

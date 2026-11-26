@@ -24,7 +24,7 @@ pub use crate::budget_secs;
 /// probe, re-exported from the bash tool's executor: every backend that
 /// spawns a host process applies the same "no terminal" contract, and
 /// the definition lives where the `bash` tool's spec does.
-pub use rhema_bash::exec::{NONINTERACTIVE_ENV, setsid_executable};
+pub use rhema_bash::exec::{NONINTERACTIVE_ENV, OSC7577_TOKEN, setsid_executable};
 
 /// The stream tail a finished command keeps: a runaway command cannot
 /// flood memory, and the tool applies its display caps again on top

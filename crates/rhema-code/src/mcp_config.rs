@@ -394,6 +394,9 @@ impl McpStore {
         let output = std::process::Command::new(program)
             .arg("prompt")
             .envs(&self.env)
+            // The terminal's resume token stops here: a prompt renderer
+            // has no business minting a resume record for it.
+            .env_remove(rhema_bash::exec::OSC7577_TOKEN)
             .output()
             .ok()?;
         if !output.status.success() {

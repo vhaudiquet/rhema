@@ -549,6 +549,10 @@ fn run_probe(manifest: &Manifest, workspace: &Path) -> Result<String, String> {
         .arg("-c")
         .arg(probe_script(manifest))
         .current_dir(workspace)
+        // The terminal's program-resume token stops with the programs
+        // rhema starts: this probe runs commands of its own, and none of
+        // them may register a record for the terminal.
+        .env_remove(rhema_bash::exec::OSC7577_TOKEN)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

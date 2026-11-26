@@ -144,6 +144,13 @@ pub const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("DEBIAN_FRONTEND", "noninteractive"),
 ];
 
+/// The terminal's token for the program-resume protocol (OSC 7577).
+/// A reporting program keeps it from everything it starts: a child that
+/// can write to the terminal would otherwise register a command the
+/// terminal runs later, as the user and unattended. The `bash` tool is
+/// exactly such a child, and the model chooses what it runs.
+pub const OSC7577_TOKEN: &str = "OSC7577_TOKEN";
+
 /// The `setsid` binary on this host, resolved from `PATH` once. A
 /// captured command runs in a new session under it, so a program that
 /// opens `/dev/tty` gets `ENXIO` instead of the frontend's terminal.
@@ -389,6 +396,10 @@ fn captured_command(
             env.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
         )
+        // The resume token stops here (see [`OSC7577_TOKEN`]): this
+        // child runs model-chosen commands and must not be able to mint
+        // a record for the terminal that started rhema.
+        .env_remove(OSC7577_TOKEN)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -639,6 +650,21 @@ mod tests {
     use super::*;
     use rhema_core::OutputOnly;
     use std::sync::atomic::AtomicBool;
+
+    #[cfg(feature = "local-shell")]
+    #[test]
+    fn the_resume_token_is_removed_from_the_child() {
+        // The terminal's OSC 7577 token stops at the executor: a command
+        // the model chose must not be able to register a resume record
+        // the terminal would run later, unattended. `None` is a removal
+        // in the child's environment, not an empty value.
+        let (command, _) = captured_command("true", Path::new("/"), &[]);
+        let removed = command
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == OSC7577_TOKEN && value.is_none());
+        assert!(removed, "the child's env must list the token as removed");
+    }
 
     /// One run through an executor, the deadline and the cwd the tests
     /// share; the output is the assertion, so a nonzero exit still
