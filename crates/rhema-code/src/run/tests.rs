@@ -468,3 +468,108 @@ fn a_slot_that_changes_sprite_deletes_the_old_pair() {
     assert!(stale.contains(&piece(3, 1002)));
     assert!(stale.contains(&piece(4, 1001)));
 }
+
+#[cfg(test)]
+mod flag_fold_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn args_with(argv: &[&str]) -> Args {
+        Args::parse_from(std::iter::once("rhema").chain(argv.iter().copied()))
+    }
+
+    /// `rhema --profile work run "hi"` parses the flag onto `Args` and
+    /// hands `run` an untouched `RunArgs`: the fold is what carries it.
+    #[test]
+    fn top_level_flags_reach_the_run_verb() {
+        let mut args = args_with(&[
+            "--profile",
+            "work",
+            "--workspace",
+            "/tmp/ws",
+            "--resume",
+            "checkpoint.json",
+            "--save",
+            "out.json",
+            "--max-steps",
+            "7",
+            "--thinking",
+            "low",
+            "run",
+            "hi",
+        ]);
+        let Some(crate::args::Command::Run(run)) = args.command.take() else {
+            panic!("the run verb parsed");
+        };
+
+        let run = fold_into_run(run, &args);
+
+        assert_eq!(run.profile.as_deref(), Some("work"));
+        assert_eq!(run.workspace, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(
+            run.resume.as_deref(),
+            Some(std::path::Path::new("checkpoint.json"))
+        );
+        assert_eq!(run.save.as_deref(), Some(std::path::Path::new("out.json")));
+        assert_eq!(run.max_steps.get(), 7);
+        assert_eq!(run.thinking, Some(crate::args::ThinkingKind::Low));
+    }
+
+    /// The verb's own spelling wins; the defaults are what the fold
+    /// fills.
+    #[test]
+    fn the_verbs_own_flags_win() {
+        let mut args = args_with(&[
+            "--profile",
+            "work",
+            "run",
+            "--profile",
+            "personal",
+            "--workspace",
+            "/tmp/sub",
+            "hi",
+        ]);
+        let Some(crate::args::Command::Run(run)) = args.command.take() else {
+            panic!("the run verb parsed");
+        };
+
+        let run = fold_into_run(run, &args);
+
+        assert_eq!(run.profile.as_deref(), Some("personal"));
+        assert_eq!(run.workspace, std::path::PathBuf::from("/tmp/sub"));
+    }
+
+    /// Untouched on both sides: the defaults stand.
+    #[test]
+    fn nothing_typed_keeps_the_defaults() {
+        let mut args = args_with(&["run", "hi"]);
+        let Some(crate::args::Command::Run(run)) = args.command.take() else {
+            panic!("the run verb parsed");
+        };
+
+        let run = fold_into_run(run, &args);
+
+        assert_eq!(run.profile, None);
+        assert_eq!(run.workspace, std::path::PathBuf::from("."));
+        assert_eq!(
+            run.max_steps,
+            rhema_host_agent::HostAgentConfig::DEFAULT_MAX_TURN_STEPS
+        );
+    }
+
+    /// The ACP verb takes the profile too, and still refuses a
+    /// workspace flag: the client names that per session.
+    #[test]
+    fn top_level_flags_reach_the_acp_verb() {
+        let mut args = args_with(&["--profile", "work", "--thinking", "high", "acp"]);
+        let Some(crate::args::Command::Acp(mut acp)) = args.command.take() else {
+            panic!("the acp verb parsed");
+        };
+
+        fold_into_acp(&mut acp, &args);
+
+        assert_eq!(acp.profile.as_deref(), Some("work"));
+        assert_eq!(acp.thinking, Some(crate::args::ThinkingKind::High));
+        assert!(Args::try_parse_from(["rhema", "acp", "--workspace", "/tmp"]).is_err());
+    }
+}

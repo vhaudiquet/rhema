@@ -88,14 +88,67 @@ fn migrate_stored_keys(config: &mut Config, secrets: Option<&dyn SecretStore>) {
     }
 }
 
+/// Folds the flags typed before the verb into `rhema run`'s own.
+///
+/// clap parses `rhema --profile work run "hi"` into `Args.profile` plus
+/// the verb's untouched `RunArgs`, and the run path used to be handed
+/// only the latter, so every top-level flag was silently dropped. The
+/// verb's own spelling wins: a value that differs from its default was
+/// typed after the verb, and the top-level flag only fills the default.
+fn fold_into_run(mut run: RunArgs, args: &Args) -> RunArgs {
+    run.profile = run.profile.take().or_else(|| args.profile.clone());
+    run.resume = run.resume.take().or_else(|| args.resume.clone());
+    run.save = run.save.take().or_else(|| args.save.clone());
+    run.thinking = run.thinking.or(args.thinking);
+    run.no_transcript |= args.no_transcript;
+    if run.workspace.as_os_str() == "." {
+        run.workspace = args.workspace.clone();
+    }
+    if run.max_steps == rhema_host_agent::HostAgentConfig::DEFAULT_MAX_TURN_STEPS {
+        run.max_steps = args.max_steps;
+    }
+    run
+}
+
+/// [`fold_into_run`] for `rhema acp`. The workspace is not a flag of
+/// this verb: the client names it per session in `session/new`.
+fn fold_into_acp(acp: &mut crate::args::AcpArgs, args: &Args) {
+    acp.profile = acp.profile.take().or_else(|| args.profile.clone());
+    acp.thinking = acp.thinking.or(args.thinking);
+    if acp.max_steps == rhema_host_agent::HostAgentConfig::DEFAULT_MAX_TURN_STEPS {
+        acp.max_steps = args.max_steps;
+    }
+}
+
+/// Clears the turn state a submit set when no agent exists to run it.
+///
+/// The step right after onboarding submits with the profile configured
+/// and the agent not built yet: returning with `turn.running` set left
+/// the spinner on for good, Esc with nothing to cancel. The input guard
+/// answers the ordinary path with a notice and keeps the text; this is
+/// the backstop for any other submit.
+fn no_backend(app: &mut App) {
+    app.turn.running = false;
+    app.turn.started_at = None;
+    app.transcript
+        .push_notice("the backend is not ready yet; the prompt was not sent");
+}
+
 /// Runs the frontend: the ACP server, the `run` one-shot, or the
 /// full-screen TUI, the subcommand decides, and bare `rhema` is the TUI
 /// only when a terminal is attached.
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(mut args: Args) -> anyhow::Result<()> {
+    // The verb is taken out of `args` so the flags that came before it
+    // stay borrowable beside it: the subcommand's own struct does not
+    // carry them.
+    let command = args.command.take();
     // The ACP branch first: stdin/stdout are the protocol wire, so no
     // terminal detection may run, a served agent never has a tty.
-    match args.command {
-        Some(crate::args::Command::Acp(acp)) => return run_acp(acp),
+    match command {
+        Some(crate::args::Command::Acp(mut acp)) => {
+            fold_into_acp(&mut acp, &args);
+            return run_acp(acp);
+        }
         Some(crate::args::Command::KitVersion) => {
             println!("{}", rhema_bash::runtime::KIT_VERSION);
             std::process::exit(0);
@@ -172,7 +225,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             std::process::exit(2);
         }
         Some(crate::args::Command::Update) => return update_command().await,
-        Some(crate::args::Command::Run(run)) => return run_headless(run).await,
+        Some(crate::args::Command::Run(run)) => {
+            return run_headless(fold_into_run(run, &args)).await;
+        }
         Some(crate::args::Command::System { action }) => {
             return system_command(action, &args.workspace, args.profile.as_deref());
         }
