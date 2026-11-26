@@ -213,13 +213,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     if let Some(problem) = rhema_bash::jobs::backend_problem() {
         eprintln!("warning: background jobs disabled: {problem}");
     }
-    // Headless has no `/resume`: `--save` names a file, and its stem is
-    // the tag a later run reading that file can list. Without one the
-    // tag is random and the jobs are not resumable, which the spec says
-    // rather than pretending otherwise.
+    // Both `--save` and `--resume` name a session file, and its stem is
+    // the tag a later run reading that file lists jobs under: a resumed
+    // run without `--save` writes back to the file it read, so its jobs
+    // have to land on that tag too. Without either the tag is random and
+    // the jobs are not resumable, which the spec says rather than
+    // pretending otherwise.
     let jobs_tag = args
         .save
         .as_deref()
+        .or(args.resume.as_deref())
         .and_then(crate::jobs::tag_from_path)
         .unwrap_or_else(crate::jobs::fallback_tag);
     // One kit set, one init file: the same placement the TUI runs,
