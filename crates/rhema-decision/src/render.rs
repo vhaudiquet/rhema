@@ -41,15 +41,19 @@ pub fn render(response: &DecisionResponse, kind: &str) -> String {
         return out;
     }
     out.push('\n');
-    let mut dropped = 0usize;
+    // Counted, not derived from `out.lines()`: the header and its blank
+    // line are in there, so a lone oversized answer made the subtraction
+    // `1 - 2`, a panic in debug and a wrapped count in release.
+    let mut rendered = 0usize;
     for (question, answer) in &response.answers {
         let line = format!("{question}: {}\n", render_answer(answer));
         if out.len() + line.len() > MAX_RENDER_BYTES {
-            dropped = response.answers.len() - out.lines().count();
             break;
         }
         out.push_str(&line);
+        rendered += 1;
     }
+    let dropped = response.answers.len() - rendered;
     if dropped > 0 {
         out.push_str(&format!(
             "[{dropped} more answer(s) dropped: the {MAX_RENDER_BYTES} byte render cap]\n"
@@ -310,5 +314,63 @@ mod tests {
         let back: DecisionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back, response);
         assert!(json.contains("\"input_tokens\": 328"), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod oversized_answer_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// One answer longer than the whole cap used to compute
+    /// `answers.len() - out.lines().count()`, which is `1 - 2`: an
+    /// underflow panic in debug, a wrapped count in release.
+    #[test]
+    fn a_lone_oversized_answer_is_counted_as_dropped() {
+        let question = "q".repeat(MAX_RENDER_BYTES);
+        let response = DecisionResponse {
+            model: "jev-1.13.0".into(),
+            answers: BTreeMap::from([(question, Answer::Noul { noul: 0.5 })]),
+            usage: crate::response::Usage {
+                input_tokens: 1,
+                cost: None,
+                output_tokens: 1,
+            },
+        };
+
+        let out = render(&response, "jev");
+
+        assert!(
+            out.ends_with("[1 more answer(s) dropped: the 8192 byte render cap]\n"),
+            "{out}"
+        );
+    }
+
+    /// The drop count is the answers that did not fit, whichever line
+    /// hit the cap.
+    #[test]
+    fn only_the_answers_that_did_not_fit_are_dropped() {
+        let mut answers = BTreeMap::new();
+        answers.insert("short".to_owned(), Answer::Noul { noul: 0.5 });
+        // `z` sorts after `short`, so the short line renders first and
+        // the oversized one is the line that breaks the loop.
+        answers.insert("z".repeat(MAX_RENDER_BYTES), Answer::Noul { noul: 0.5 });
+        let response = DecisionResponse {
+            model: "jev-1.13.0".into(),
+            answers,
+            usage: crate::response::Usage {
+                input_tokens: 1,
+                cost: None,
+                output_tokens: 1,
+            },
+        };
+
+        let out = render(&response, "jev");
+
+        assert!(out.contains("\nshort: 0.50 uncertain\n"), "{out}");
+        assert!(
+            out.ends_with("[1 more answer(s) dropped: the 8192 byte render cap]\n"),
+            "{out}"
+        );
     }
 }
