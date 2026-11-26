@@ -1,12 +1,15 @@
 # rhema-runtime-kit, what a generated bash function needs and how it crosses a sandbox
 
-> **Status:** v1 implemented for jobs, vision, search, and decide.
-> `see`, `search`, and `decide` are shell macros with no helper
-> binary. `search` and `decide` talk to a per-session host endpoint;
-> `job` still runs the installed helper because `gob` is a binary.
-> MCP is no longer a kit: `mcp-cli` runs inside the sandbox and reads
-> its own config there. The bridge and socket sections below describe
-> the earlier host-side design and are kept as history.
+> **Status:** implemented for jobs, vision, search, and decide.
+> `see`, `search`, `decide`, and a sandboxed `job` are shell text;
+> `job` needs `gob`, not the rhema helper. `search` and `decide` hand
+> their argv to a per-session host endpoint. Local sessions still run
+> the host binary's hidden modes. The sandbox installer still installs
+> the `rhema` binary as the kit's version carrier, but no sandbox
+> feature executes that copy; removing the install is the remaining
+> work. MCP is no longer a kit: `mcp-cli` runs inside the sandbox and
+> reads its own config there. The bridge and socket sections below
+> describe the earlier host-side design and are kept as history.
 > **Grounding:** `specs/rhema-sandbox.md` (the seam and its two
 > families), `specs/rhema-mcp.md` (§5, §10, §12), `rhema-bash::init`
 > (today's provisioner), `app/setup.rs` (the five gates).
@@ -19,26 +22,28 @@
 ## 0. Scope
 
 Four features reach the model through the same mechanism: a function
-defined in a `BASH_ENV` init file. `job` execs the installed helper
-(`gob` comes with it). `see` is shell text that stages an image.
-`search` and `decide` are shell text over a per-session host endpoint:
-the function sends its argv to the host over a Unix socket, and the
-host resolves the profile, providers, and keys in its own memory.
-`mcp` moved to its own CLI. Each one is placed wherever the session's
-bash runs.
+defined in a `BASH_ENV` init file. `job` is shell text over `gob` in a
+sandbox and the hidden `__jobs` mode on the host. `see` is shell text
+that stages an image. `search` and `decide` are shell text over a
+per-session host endpoint: the function sends its argv to the host
+over a Unix socket, and the host resolves the profile, providers, and
+keys in its own memory. `mcp` moved to its own CLI. Each one is placed
+wherever the session's bash runs.
 
 **In scope:** one kit description shared by the four; placement into a
 local temp dir, a backend-shared dir, or a sandbox-side cache;
 the env channel that makes `BASH_ENV` and the bin variable arrive; the
-helper executable's resolution and versioning; the capability matrix
+installed binaries' resolution and versioning; the capability matrix
 that decides which kit a backend can carry; tests and a rollout.
 
-**Out of scope, v1:** moving the MCP servers themselves into the
-sandbox (§12.4), a pure-bash bridge client, image building, Windows,
-and the provider-secret question for `search`/`decide` beyond naming
-the two forms it can take (§8).
+**Out of scope, v1:** image building, Windows, and the HTTP host route
+for `search`/`decide`. The host-side MCP bridge is history; the servers
+now live in the sandbox behind `mcp-cli`.
 
-## 1. The problem, verified against this tree
+## 1. The problem this work removed
+
+This section records the tree before the kit landed; it is history. The
+current state is §11.
 
 - **One gate, five features.** `session_agent_config` builds jobs and
   vision only under `(sandboxed.is_none())`, and `wire_for_session` in
@@ -75,7 +80,7 @@ A kit is a pure description, no filesystem work:
 pub struct Kit {
     /// `jobs`, `vision`, `search`, `decision`.
     pub feature: Feature,
-    /// The stubs this feature adds: one for a helper-backed macro.
+    /// The stubs this feature adds: one per hidden-mode macro.
     pub stubs: Vec<Stub>,
     /// The shell macros this feature adds: `see`.
     pub shells: Vec<Shell>,
@@ -246,47 +251,53 @@ Two small types replace the `sandboxed.is_none()` test:
 pub struct Capabilities {
     /// A directory both sides see, when the backend can mount one.
     pub shared_root: Option<SharedRoot>,
-    /// `Sandbox::write_file` can carry a helper and an init file.
+    /// `Sandbox::write_file` can carry an init file.
     pub upload: bool,
     /// The host can read the sandbox's files (`read_file`).
     pub pull: bool,
-    /// The sandbox can dial a host TCP endpoint.
-    pub inbound_net: bool,
 }
 
 pub struct Needs {
-    /// An executable and an init file (every kit).
+    /// An init file and the helper install probe.
     pub exec: bool,
     /// State the host must read (jobs, vision): a shared root or a
     /// `read_file` pull.
     pub shared_state: bool,
-    /// A live host endpoint (mcp; search/decide if they take the bridge).
-    pub bridge: bool,
     /// Host-side config or keys (search, decide).
     pub secrets: bool,
 }
 ```
 
 `session_agent_config` asks `needs.satisfied_by(caps)` per kit: a kit's
-`shared_state` needs a `shared_root` or `pull`, and its `bridge` needs a
-`shared_root` or `inbound_net`. A kit that cannot be placed is skipped
-with a debug notice, the same fail-closed behavior as today's gate. The
-prompt section is set only for placed kits.
+`shared_state` needs a `shared_root` or `pull`. A kit that cannot be
+placed is skipped with a debug notice, the same fail-closed behavior as
+the original gate. The prompt section is set only for placed kits.
 
-| backend | shared root | upload | pull | inbound_net | kits in v1 |
+The four kits are jobs, vision, search, and decide. MCP is not one:
+`mcp-cli` is installed beside the helper and reads its own config, so
+its availability is the installer's, not a kit's.
+
+| backend | shared root | upload | pull | kits |
 |---|---|---|---|---|
-| local | n/a | n/a | n/a | n/a | all |
-| docker | yes, second bind mount | yes | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, search/decide, mcp |
-| lxd container | yes, disk device | yes | yes | same as docker | jobs, vision, search/decide, mcp |
-| lxd vm | no | yes (seed) | yes | unproven | jobs/vision/search/decide by pull |
-| ecrou | yes, extra share (virtiofs) | n/a | yes | unproven: MCP on, bind failure leaves it off | vision; jobs stay off (one boot per command) |
-| ssh | no | yes | yes | yes (remote forward) | mcp, search/decide, jobs/vision by pull |
-| http | no | `PUT` (size cap) | yes | no | jobs/vision/search/decide by pull |
+| local | n/a | n/a | n/a | all |
+| docker | yes, second bind mount | yes | yes | jobs, vision, search/decide |
+| lxd container | yes, disk device | yes | yes | jobs, vision, search/decide |
+| lxd vm | no | yes (seed) | yes | jobs, vision; search/decide have no host forward |
+| ecrou | yes, extra share (virtiofs) | n/a | yes | vision, search/decide if the share carries the socket; jobs stay off (one boot per command) |
+| ssh | no | yes | yes | jobs, vision, search/decide |
+| http | no | `PUT` (size cap) | yes | jobs, vision; search/decide have no host route |
 
 The table is the decision point: a backend is supported by declaring
-capabilities, not by adding another `if sandboxed`.
+capabilities, not by adding another `if sandboxed`. Notifications are
+separate from placement: SSH and HTTP poll the sandbox's `gob` for job
+finishes, local holds `gob events`, and the mounted backends have no
+feed yet.
 
 ## 5. Transport
+
+The MCP bridge described in this section is history. The search and
+decide host endpoint uses the same Unix socket shape, without a
+long-lived server process on the host.
 
 `mcp` is the one kit whose state is live. The bridge is a host process
 holding the MCP client sessions (stdio children or HTTP connections),
@@ -318,8 +329,8 @@ pub enum Bridge {
   the sandbox can reach: the docker bridge gateway for a container, a
   loopback port for an ssh session's `-R` forward. The token is the
   auth; the port is allocated per session, never fixed.
-- **None:** http has no inbound route in v1; MCP is off there, with a
-  notice, and the other kits are unaffected.
+- **None:** http has no inbound route for a host bridge. The current
+  sandbox-owned MCP client does not need one.
 
 The MCP entry owns the bridge and the socket path; the placer creates
 the parent dir first. On teardown the entry's guard unlinks the socket
@@ -353,6 +364,12 @@ needs them.
 ## 7. The helper
 
 The helper is installed inside the sandbox, never copied from the host.
+No sandbox kit executes that copy now. `job`, `see`, `search`, and
+`decide` are shell text in a sandbox, and `mcp-cli` is its own binary.
+The install remains as the version carrier every kit probes through
+`__kit-version`; removing it is tracked in §11. On the host, the same
+binary still serves the hidden `__jobs`, `__vision`, `__search`, and
+`__decision` modes.
 The host's binary is the wrong OS and architecture for an ssh box or a
 container on another machine, and a copy is tens of megabytes at best.
 
@@ -399,11 +416,11 @@ same way.
 
 | feature | helper | shared state | bridge | secrets | note |
 |---|---|---|---|---|---|
-| jobs | yes | yes: the jobs dir, or a pull | no | no | `gob` comes with the install |
+| jobs | install probe | yes: the jobs dir, or a pull | no | no | shell macro over `gob` in a sandbox |
 | vision | no | yes: the staging dir, or a pull | no | no | shell macro; fs-disjoint pulls the staged files |
-| search | no | no | yes: host endpoint | no | shell macro; host resolves and runs the chain |
-| decide | no | no | yes: host endpoint | no | shell macro; host resolves and runs the instance |
-| mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |
+| search | install probe | no | yes: host endpoint | yes: host-side chain | shell macro; host resolves and runs the chain |
+| decide | install probe | no | yes: host endpoint | yes: host-side instance | shell macro; host resolves and runs the instance |
+| mcp | not a kit | config file in the sandbox | no | no | `mcp-cli` reads its own config |
 
 The host-read state is two things: vision's staging dir (the images the
 host attaches) and jobs' session dir (the host's steering feed). They
@@ -424,9 +441,10 @@ and `decide` take the host-endpoint route:
   carries the argv and any stdin. The host resolves the profile and
   the keychain once at setup, keeps the chain or decision instance in
   process, and answers `{"code", "stdout", "stderr"}`.
-- Docker, LXD, and ecrou reach the socket through the runtime mount.
-  SSH asks the backend for a reverse Unix-socket forward. HTTP has no
-  route yet, so its macros stay off with a notice.
+- Docker, LXD containers, and ecrou reach the socket through the
+  runtime mount. SSH asks the backend for a reverse Unix-socket
+  forward. HTTP has no route, and an LXD VM has no forward either, so
+  their macros stay off with a notice.
 - `sandbox.inject_credentials` no longer wires these macros. The
   `RHEMA_SEARCH_CHAIN` and `RHEMA_DECISION_INSTANCE` env forms remain
   only as the standalone CLI's diagnostic path, not the session route.
@@ -461,8 +479,8 @@ and `decide` take the host-endpoint route:
 |---|---|
 | no helper source, a failed install, or an incompatible version | that kit is skipped, debug notice, the session runs |
 | the installer script cannot be delivered | that kit is skipped, with the reason |
-| UDS cannot connect in the sandbox | MCP is skipped; jobs/vision/search/decide are unaffected |
-| ecrou's virtiofs cannot carry a UDS | MCP falls back to TCP if the backend has inbound_net, else skipped |
+| the host endpoint cannot be reached | `search`/`decide` exit 4; jobs and vision are unaffected |
+| ecrou's virtiofs cannot carry the socket | `search`/`decide` fail their call; the other kits run |
 | a stale session dir | the drop guard removes it; a start sweep removes dirs older than seven days |
 | a stale helper version | removed by the 30-day sweep unless it is the running version |
 
@@ -505,25 +523,22 @@ and `decide` take the host-endpoint route:
 Each phase lands green, and the spec's matrix is updated with what the
 backend actually did, not what the table predicted.
 
-Status: the env channel, the local placement, the docker/lxd/ecrou
-runtime mounts, the in-sandbox installer, the shared MCP bridge, and
-the ssh/http sandbox placement are in. On every backend the kits ride
-`__kit-version` and run the installed helper. SSH and HTTP run the
-installer into `$HOME/.cache/rhema` and read the init file and the
-per-session state from there. Search and decide ride the per-session host
-endpoint on local, Docker, LXD, ecrou, and SSH. HTTP has no host route
-yet. Ecrou now enables the MCP bridge over its virtiofs share; the UDS
-is unproven there, so a failed bind keeps MCP off and leaves the other
-kits running.
+Status: the env channel, the local placement, the Docker/LXD/ecrou
+runtime mounts, the in-sandbox installer, and the SSH/HTTP placement are
+in. Every sandbox kit is gated on `__kit-version`, but the `rhema`
+binary the installer places is only a version carrier now; no sandbox
+feature executes that copy.
+SSH and HTTP install into `$HOME/.cache/rhema` and read the init file
+and the per-session state from there.
 
-Jobs and vision now provision their state under the shared session
-tree and the shell's env names those paths. Vision works on docker,
-lxd, and ecrou. Jobs work on docker and lxd; ecrou boots a machine per
-command, so the gob daemon dies with it. Host-side jobs steering is
-off for sandboxed sessions: the poller reads the host's gob, not the
-sandbox's, so the model polls `job ls`. SSH and HTTP now run the same
-installer into `$HOME/.cache/rhema`; vision pulls its staged files
-back over the sandbox file route.
+Vision works on every backend. Jobs work everywhere except ecrou, which
+boots a machine per command, so the gob daemon dies with it. Finish
+notifications work on local, SSH, and HTTP; the mounted backends place
+the job macro but have no feed yet, so the model polls `job ls` there.
+Search and decide use the per-session host endpoint on local, Docker,
+LXD containers, ecrou, and SSH. HTTP has no host route, and an LXD VM
+has no forward either. MCP is `mcp-cli` in the sandbox on every backend
+except a non-persistent ecrou sandbox.
 
 ## 12. Decisions
 
@@ -550,22 +565,23 @@ back over the sandbox file route.
    the sandbox's `os_arch`, honors `RHEMA_INSTALL_DIR`, verifies the
    tarball's sha256, and installs `gob` beside `rhema`. The small CLI
    target makes the install cheaper, not different.
-4. **MCP servers stay host-side in v1.** The alternative is a separate
-   design: servers must outlive commands, which ecrou's per-command VM
-   and ssh cannot offer without a daemon. Document the host-fs exposure
-   in the MCP spec when the sandbox path ships.
+4. **MCP servers moved into the sandbox.** The host bridge and its
+   socket are gone; `mcp-cli` runs in the sandbox and reads its own
+   config. A server that must outlive a command runs under the
+   sandbox's own process model, not a host bridge.
 5. **Capabilities replace the sandbox gate.** `sandboxed.is_none()`
    disappears from `setup.rs`; the gate is per kit and per backend.
 6. **Fail closed.** A kit that cannot be placed is absent from the
    prompt and the shell; it never half-works.
 7. **The init file is generated inside the sandbox and static per kit
-   version.** The function bodies are already static
-   (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`), and the per-session
-   values are env. One file, no chain, no host write, no shared root.
-8. **The shared root is for the socket, the install, and the session
-   tree when one exists.** Without it, the session tree is the
-   sandbox's temp dir and the host pulls it. Only the MCP socket needs
-   a live shared path.
+   version.** The function bodies are static (`job()` runs `gob` in a
+   sandbox, `see()` stages an image, `search()` and `decide()` post to
+   the host endpoint), and the per-session values are env. One file, no
+   chain, no host write, no shared root.
+8. **The shared root is for the install, the session tree, and the host
+   endpoint when one exists.** Without it, the session tree is the
+   sandbox's temp dir and the host pulls it. `search` and `decide` need
+   either that socket or an SSH forward.
 9. **Cleanup is a drop guard plus a start sweep.** A sandbox dir cannot
    ride a host `TempDir`, so the placer removes it explicitly, and the
    next start ages out what a crash left. The sweep is one level deep,
@@ -610,8 +626,8 @@ back over the sandbox file route.
   carries the lifecycle.
 - For ssh, who allocates the forwarded port, and how does a stale
   forward get reclaimed when a session dies?
-- Search/decide: scoped config or host bridge? The answer changes
-  whether their `Needs.bridge` is `true`.
+- Search/decide: the host endpoint is the answer on local, Docker, LXD
+  containers, ecrou, and SSH. HTTP and LXD VMs still need a route.
 - Http: can its `PUT` cap rise, or does a helper need an install URL
   the sandbox fetches itself?
 - Does the installer need a `--version` flag, or is latest-plus-

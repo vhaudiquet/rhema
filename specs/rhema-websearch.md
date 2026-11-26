@@ -1,9 +1,11 @@
 # rhema-websearch, web search as shell data
 
-> **Status:** v1 spec, 2026-11-14, written for review before any code
-> lands.
+> **Status:** implemented. A local session execs the hidden
+> `__search` mode; a sandboxed session with a route to the host installs
+> the `search` shell function and posts to the session's host endpoint.
+> HTTP sandboxes have no host route yet, so the macro stays off there.
 > **Grounding:** SPEC.md §1 (the second-consumer discipline);
-> `specs/rhema-mcp.md` §2 (the BASH_ENV provision this macro rides);
+> `specs/rhema-runtime-kit.md` (the BASH_ENV provision this macro rides);
 > the `see` macro (`crates/rhema-bash/src/vision.rs`) and the
 > `job` macro (`crates/rhema-bash/src/jobs.rs`), the two
 > existing members of the macro family.
@@ -41,8 +43,8 @@ of the `see`/`job` family. If wiring this needed a new type in
 - `rhema-bash::websearch`: the `search` function's init file,
   the wiring, the prompt section.
 - `rhema-host-agent`: one prompt-section field, `websearch`.
-- `rhema-code`: the hidden `__search` mode, the session wiring, the
-  settings menu.
+- `rhema-code`: the hidden `__search` mode, the per-session host
+  endpoint, the session wiring, the settings menu.
 
 **OUT of v1** (each deliberately out, with the reason):
 
@@ -54,10 +56,10 @@ of the `see`/`job` family. If wiring this needed a new type in
 - ❌ **Caching.** Every `search` call is one fresh chain run. A model
   that retries a query pays twice; an in-process LRU keyed by the
   query tuple is a follow-up with numbers behind it.
-- ❌ **Sandboxed and cloud sessions.** The macro is local-only, gated
-  exactly like vision, jobs, and MCP: a session whose bash runs
-  elsewhere cannot exec the frontend's binary, and a cloud sandbox
-  holds no secret store and no config file.
+- ❌ **HTTP sandboxes and cloud frontends with no host route.** The
+  host endpoint needs a socket the sandbox can reach: a shared mount or
+  an SSH forward. HTTP has neither yet, and a cloud frontend has no
+  session host process to call.
 - ❌ **A public `rhema websearch` CLI.** Settings change through the
   TUI or the file. The MCP verbs got a CLI because servers are
   installed from shell one-liners; nothing here has shown that need.
@@ -415,15 +417,17 @@ link, before MCP:
 jobs -> vision -> search -> MCP     (the BASH_ENV lineage)
 ```
 
-The gate is `sandboxed.is_none() && configured`, where `configured`
-is: the profile's `websearch_enabled` is on (unset counts as on), and
-it holds at least one instance whose key resolves, or any of the four
-environment variables is set. The switch closes both tiers, so a
-disabled profile wires nothing even on a machine with an environment
-key. The gate needs the
-same resolution the mode runs, so it lives in one place,
-`search_wire.rs`, called by both. Sandboxed sessions get no function
-and no section, the vision rule.
+The gate is `configured` plus a route to the host endpoint.
+`configured` is: the profile's `websearch_enabled` is on (unset counts
+as on), and it holds at least one instance whose key resolves, or any of
+the four environment variables is set. The switch closes both tiers, so
+a disabled profile wires nothing even on a machine with an environment
+key. `search_wire::wire_for_session` resolves the chain once on the host
+and asks `cap::wire` for the session endpoint. A local session execs
+`rhema __search`; a sandboxed one gets the shell function that posts its
+argv to the endpoint, and keys never enter the sandbox. HTTP has no route, so `cap::wire` returns `None` and the macro
+and its prompt section stay off. A backend with no forward path, such
+as an LXD VM, still gets the function but its calls exit 4.
 
 **`rhema-code`, headless (`rhema -p`).** `run/headless.rs` extends
 the same wiring, the same gate, the same profile.
@@ -454,8 +458,8 @@ the credential lands, whether the same key should serve hosted
 search; yes appends the companion instance to `websearch_order`.
 
 **Later consumers.** The claw pulls the adapter crates and assembles
-a `Chain` behind its own profile policy; nothing in v1 changes for
-it. The cloud harness waits for the sandbox story (§0).
+a `Chain` behind its own profile policy; nothing in v1 changes for it.
+The cloud frontends have no host endpoint yet, so they wire nothing.
 
 ## 11. Commit sequence
 
@@ -546,8 +550,8 @@ Each commit is green on the three checks in AGENTS.md.
   writing the same fields the TUI writes.
 - A user-authored global `websearch.yaml` beside `mcp.yaml`, if
   hand-editing demand shows.
-- The sandbox and cloud story: the macro needs the binary and the
-  secret store where bash runs; a sandbox daemon holding a delegated
-  chain is a design of its own.
+- The HTTP host route: the endpoint is a Unix socket today, so HTTP
+  needs a TCP endpoint or another transport. Cloud frontends need the
+  same route before they can wire the macro.
 - Per-instance knobs (safe search, search depth, regions) once a use
   names one.

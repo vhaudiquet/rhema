@@ -522,8 +522,10 @@ the stdin form once.
 ## 7. Prompt disclosure
 
 The renderer gains one section, and it renders **only when MCP is
-wired** (§9: a sandboxed frontend wires nothing, so nothing advertises
-what cannot run). The template decides placement, like skills and tools.
+wired**. In the current sandbox-owned design that means the `mcp` client
+is installed and its `prompt` output is non-empty; nothing advertises a
+server the session cannot run. The template decides placement, like
+skills and tools.
 
 ```markdown
 ## MCP servers

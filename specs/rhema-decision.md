@@ -1,12 +1,14 @@
 # rhema-decision, decision models as shell data
 
-> **Status:** v1 spec, 2026-11-23, written alongside the code it
-> describes; revised the same day: named instances and one default
-> per profile, the turn providers' shape, in place of the fallback
-> chain the first draft had; and OpenRouter as a third kind, the
-> aggregator's Decisions route.
+> **Status:** implemented. A local session execs the hidden
+> `__decision` mode; a sandboxed session with a route to the host
+> installs the `decide` shell function and posts to the session's host
+> endpoint. HTTP sandboxes have no host route yet. Revised the same
+> day: named instances and one default per profile, the turn providers'
+> shape, in place of the fallback chain the first draft had; and
+> OpenRouter as a third kind, the aggregator's Decisions route.
 > **Grounding:** SPEC.md §1 (the second-consumer discipline);
-> `specs/rhema-mcp.md` §2 (the BASH_ENV provision this macro rides);
+> `specs/rhema-runtime-kit.md` (the BASH_ENV provision this macro rides);
 > `specs/rhema-websearch.md` (the macro family's fourth member, whose
 > shape this one follows: a seam crate, one adapter crate per vendor,
 > a registry, a bash function, a hidden binary mode).
@@ -67,10 +69,10 @@ in `rhema-core`, the boundary would be wrong; it does not.
 - `rhema-bash::decision`: the `decide` function's init file, the
   wiring, the prompt section.
 - `rhema-host-agent`: one prompt-section field, `decision`.
-- `rhema-code`: the hidden `__decision` mode, the session wiring,
-  and the settings page: **Decision models** in the sidebar, its
-  rows, the add dialog over the six rows (including OpenCode and
-  OpenCode Go), the default, removal.
+- `rhema-code`: the hidden `__decision` mode, the per-session host
+  endpoint, the session wiring, and the settings page: **Decision
+  models** in the sidebar, its rows, the add dialog over the six rows
+  (including OpenCode and OpenCode Go), the default, removal.
 
 **OUT of v1** (each deliberately out, with the reason):
 
@@ -83,10 +85,10 @@ in `rhema-core`, the boundary would be wrong; it does not.
   it. A state that does not fit is the vendor's 400, which the model
   reads as `Invalid`.
 - ❌ **Caching.** Every `decide` call is one fresh vendor call.
-- ❌ **Sandboxed and cloud sessions.** Local-only, gated exactly like
-  vision, jobs, search, and MCP: a session whose bash runs elsewhere
-  cannot exec the frontend's binary, and a cloud sandbox holds no
-  secret store and no config file.
+- ❌ **HTTP sandboxes and cloud frontends with no host route.** The
+  host endpoint needs a socket the sandbox can reach: a shared mount or
+  an SSH forward. HTTP has neither yet, and a cloud frontend has no
+  session host process to call.
 - ❌ **A public `rhema decision` CLI.** Settings change through the
   file. Nothing here has shown the need the MCP verbs had.
 
@@ -473,14 +475,18 @@ gated `{% if decision %}`.
 jobs -> vision -> search -> decision -> MCP     (the BASH_ENV lineage)
 ```
 
-The gate is `sandboxed.is_none() && configured`, where `configured`
-is `is_configured(..)`: the profile's `decision_enabled` is on (unset
-counts as on), and it holds a decision instance (even one that does
-not build, so the call reports the entry's problem rather than the
-function vanishing), or the environment serves a kind. The switch
-closes both tiers. The
-gate needs the same resolution the mode runs, so it lives in one
-place, `decision_wire.rs`, called by both.
+The gate is `configured` plus a route to the host endpoint.
+`configured` is `is_configured(..)`: the profile's `decision_enabled`
+is on (unset counts as on), and it holds a decision instance (even one
+that does not build, so the call reports the entry's problem rather than
+the function vanishing), or the environment serves a kind. The switch
+closes both tiers. `decision_wire::wire_for_session` resolves the
+instance once on the host and asks `cap::wire` for the session endpoint.
+A local session execs `rhema __decision`; a sandboxed one gets the shell
+function that posts its request to the endpoint, and keys never enter
+the sandbox. HTTP has no route, so `cap::wire` returns `None` and the macro
+and its prompt section stay off. A backend with no forward path, such
+as an LXD VM, still gets the function but its calls exit 4.
 
 **`rhema-code`, the settings page.** `SettingsSection::Decision`,
   "Decision models" in the sidebar after Web search, built from the
@@ -513,8 +519,9 @@ place, `decision_wire.rs`, called by both.
   Go root.
 
 **Later consumers.** The claw pulls the adapter crates and holds a
-provider behind the trait, resolved by its own profile policy. The cloud harness wires
-nothing (`rhema-cloud-agent/src/assembly.rs` sets `decision: None`).
+provider behind the trait, resolved by its own profile policy. The cloud
+harness has no host endpoint, so it wires nothing
+(`rhema-cloud-agent/src/assembly.rs` sets `decision: None`).
 
 ## 11. Decisions
 

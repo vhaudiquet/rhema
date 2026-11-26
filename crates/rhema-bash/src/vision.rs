@@ -18,7 +18,8 @@
 //!   bytes, stages them, and says so on stdout. The wiring's env map
 //!   carries the init file's path, the binary's, and the staging
 //!   directory's; [`wire`] builds it once per process and a frontend
-//!   layers the map over `HostAgentConfig::shell_env`.
+//!   layers the map over `HostAgentConfig::shell_env`. A sandboxed
+//!   session uses [`SHELL_BODY`] instead, so `see` needs no binary.
 //! - `attach` runs after every `bash` command that reaches an exit:
 //!   [`ShellTools`](crate::ShellTools) drains the staging directory,
 //!   turns each staged image into a [`ToolResult`] image block, and

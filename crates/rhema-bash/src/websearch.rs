@@ -14,12 +14,12 @@
 //!
 //! - [`provision_with_bin`] writes the init file one non-interactive
 //!   bash sources from `BASH_ENV` (the same fact the jobs and vision
-//!   provisions rest on, `specs/rhema-mcp.md` §2): `search()` execs
-//!   the rhema binary in its `__search` mode, whose handler is the
-//!   frontend's, not this crate's. The wiring's env map carries the
-//!   init file's path, the binary's, and the profile's name; the
-//!   frontend builds it once at session setup and layers the map over
-//!   `HostAgentConfig::shell_env`.
+//!   provisions rest on, `specs/rhema-runtime-kit.md`): on the host,
+//!   `search()` execs the rhema binary in its `__search` mode, whose
+//!   handler is the frontend's, not this crate's. The wiring's env map
+//!   carries the init file's path, the binary's, and the profile's
+//!   name; the frontend builds it once at session setup and layers the
+//!   map over `HostAgentConfig::shell_env`.
 //!
 //! Two properties make this half empty:
 //!
@@ -30,11 +30,11 @@
 //!   shell sees the profile's name, never a key, and `env` in it is
 //!   printable.
 //!
-//! A remote sandbox with the installed rhema helper wires the same
-//! function: the init file execs the helper, and the host injects the
-//! profile's resolved chain as [`VAR_CHAIN`]. The sandbox never sees
-//! the keychain or the config file, only the chain the host built. A
-//! sandbox without the helper wires nothing.
+//! A sandboxed session uses [`SHELL_BODY`] instead: the function posts
+//! its argv to the session's host endpoint, and the host resolves the
+//! profile and providers in its own memory. The sandbox never sees the
+//! keychain or the config file. A backend with no route to the host,
+//! such as HTTP today, wires nothing.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

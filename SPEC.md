@@ -474,7 +474,7 @@ decision, and a client-chosen sandbox URL would be an SSRF on a machine
 that executes commands.
 
 The same crate is what lets `rhema-code` choose where its `bash` runs:
-`local | docker | ssh | http` in v1, stored, remembered per workspace
+`local | docker | lxd | ecrou | ssh | http`, stored, remembered per workspace
 beside the remembered profile, pickable in the TUI, probed for
 availability. The choice is profile state like the provider and the
 model: a profile switch re-resolves `bash`'s home from the profile

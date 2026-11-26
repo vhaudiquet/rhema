@@ -196,7 +196,7 @@ profiles:
           model: typesafe/jev-1.14     # any slug its catalog lists under output_modalities=decisions
 ```
 
-A `base_url` on a Jev instance points the call at any server that speaks the same `/v1/systemone` wire (Ollaya, vLLM, SGLang, llama.cpp serving Clef or another open decision model). Without a `decision` section the environment serves: `TYPESAFE_API_KEY`, `CLOUDFLARE_AUTH_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`, or `OPENROUTER_API_KEY`, the first that resolves. Sandboxed sessions wire nothing, since their shell cannot reach this host's keys. `specs/rhema-decision.md` is the design.
+A `base_url` on a Jev instance points the call at any server that speaks the same `/v1/systemone` wire (Ollaya, vLLM, SGLang, llama.cpp serving Clef or another open decision model). Without a `decision` section the environment serves: `TYPESAFE_API_KEY`, `CLOUDFLARE_AUTH_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`, or `OPENROUTER_API_KEY`, the first that resolves. A sandboxed session sends `decide` to a per-session host endpoint, so the keys stay on the host; HTTP sandboxes have no route to it yet. `specs/rhema-decision.md` is the design.
 
 The **Decision models** page of `/settings` edits this section: the add row's dialog picks the kind (Jev, Clef, OpenRouter, or a custom Jev endpoint, which asks for the server's URL too), names the instance, and takes the key, which goes to the secret store as the Providers page's do; Clef also asks for its account id. Enter on a row makes it the default, `d` removes it with its secret-store entry. The model stays a file matter: each row shows what a blank asks, the kind's default.
 

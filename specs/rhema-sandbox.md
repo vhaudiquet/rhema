@@ -1,7 +1,7 @@
 # rhema-sandbox, the sandbox seam, its wire protocol, and the execution choice
 
-> **Status:** design, 2026-10-20 (decisions in §9). The rollout in §7 is
-> the commit plan; every phase lands green before the next starts.
+> **Status:** implemented, 2026-10-20 (decisions in §9). The rollout in
+> §7 landed; the backend set is local, Docker, LXD, ecrou, SSH, and HTTP.
 > **Grounding:** SPEC.md §10-§11 (the cloud frontends; the harness
 > extraction); the shim contract lives in the `rhema-cloudflare-code`
 > repository's `specs/` now.
@@ -29,7 +29,7 @@ where `bash` runs.
 - Deployment-selected backends in the cloud frontends: a Durable Object
   or a Vercel container may run `bash` on its platform's sandbox *or* on
   any machine speaking the protocol.
-- The `rhema-code` execution choice: `local | docker | ssh | http` in v1,
+- The `rhema-code` execution choice: `local | docker | lxd | ecrou | ssh | http`,
   stored in config, remembered per workspace, pickable in the TUI.
 
 **Out of scope, v1:** live output streaming (SSE), the trait contract
@@ -41,6 +41,9 @@ client-supplied sandbox URLs; cross-cloud session resume (a Store
 problem, not a sandbox one).
 
 ## 1. The problem in this tree
+
+This section records the tree before the extraction; it is history. The
+current shape is SPEC.md §12 and the backend list in §4.
 
 Verified against this tree. Line numbers move; the file names are the
 anchor. Re-verify before implementing if the tree has moved. It has:
@@ -234,7 +237,7 @@ streaming shape exists (§8).
 ## 5. `rhema-code`: choosing where `bash` runs
 
 The choice is the `ProviderChoice` pattern applied to machines: a
-`SandboxChoice` (`local | docker | ssh | http` in v1) with
+`SandboxChoice` (`local | docker | lxd | ecrou | ssh | http`) with
 `from_stored`/`stored_name`; a `sandbox` section in `rhema-config`
 (`kind`, `url`, token reference); per-workspace memory beside the
 remembered profile (`last_sandbox_in`/`note_sandbox_in`); a TUI picker
@@ -336,7 +339,7 @@ way.
   cloud frontends inherit from.
 - `VercelSandbox` keeps its `SandboxApi`-seamed offline tests unchanged.
 
-## 7. Rollout
+## 7. Rollout (historical)
 
 Per-scope commits (AGENTS.md); each lands green.
 
