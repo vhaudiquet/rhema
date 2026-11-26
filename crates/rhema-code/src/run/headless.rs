@@ -115,6 +115,14 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             eprintln!("· copied {imported} key(s) from the OS keyring into the encrypted store");
         }
     }
+    // The bundled skills seed into the global directory before anything
+    // discovers them, the same startup step the TUI runs: a one-shot
+    // reads the same folders, so it must see the same skills.
+    if let Some(home) = &home
+        && let Err(err) = crate::bundled::seed(&home.skills(), &config.skills_disabled)
+    {
+        eprintln!("warning: the bundled skills were not seeded: {err}");
+    }
     // Same profile resolution as the TUI: an explicit --profile is
     // honored as named, a directory with a remembered profile reopens on
     // it, an absent one starts on a profile that can serve turns. No
