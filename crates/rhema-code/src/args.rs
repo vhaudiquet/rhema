@@ -171,9 +171,18 @@ pub struct Args {
     #[arg(long, default_value = ".")]
     pub workspace: PathBuf,
 
-    /// Resume a previously saved session file.
+    /// Resume a previously saved session file. A path that is not there
+    /// is an error; `--resume-or-new` starts a new conversation instead.
     #[arg(long)]
     pub resume: Option<PathBuf>,
+
+    /// Resume a saved session, or start a fresh conversation at that
+    /// same path when nothing is there. This is the command the terminal
+    /// stores for program resume (OSC 7577): the file it names can be
+    /// gone by the time the terminal restarts, and a restore that dies
+    /// on a missing file would turn a restart into an error.
+    #[arg(long, conflicts_with = "resume")]
+    pub resume_or_new: Option<PathBuf>,
 
     /// Checkpoint the session after every turn.
     #[arg(long)]
@@ -565,6 +574,22 @@ mod tests {
         // it never silently stands a container up.
         assert_eq!(SandboxChoice::from_stored(None), None);
         assert_eq!(SandboxChoice::from_stored(Some("nonsense")), None);
+    }
+
+    #[test]
+    fn resume_or_new_falls_back_where_resume_fails() {
+        // One session path, two spellings: `--resume` for a path the user
+        // typed, `--resume-or-new` for the command a terminal stores and
+        // runs later, when the file may be gone. Never both.
+        let args = parse(&["--resume-or-new", "/tmp/session.json"]);
+        assert_eq!(
+            args.resume_or_new.as_deref(),
+            Some(Path::new("/tmp/session.json"))
+        );
+        assert!(args.resume.is_none());
+        let args = parse(&["--resume", "/tmp/session.json"]);
+        assert!(args.resume_or_new.is_none());
+        assert!(try_parse(&["--resume", "a", "--resume-or-new", "b"]).is_err());
     }
 
     #[test]

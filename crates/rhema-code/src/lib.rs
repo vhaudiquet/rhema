@@ -29,6 +29,8 @@
 //!   Appearance page
 //! - [`sessions`]: saved conversations for /resume, grouped by workspace
 //! - [`status`]: program status over OSC 7501, for the terminal's tabs
+//! - [`resume`]: program resume over OSC 7577, the command a terminal
+//!   runs to bring the session back
 //! - [`app`]: the state machine routing keys and events
 //! - [`turn`]: the tokio tasks (turn, model fetch)
 //! - [`update`]: the self-update seam: the channel's manifest check,
@@ -74,6 +76,7 @@ pub mod onboarding;
 mod open_url;
 pub mod palette;
 pub mod paste;
+pub mod resume;
 pub mod run;
 pub mod sandbox;
 pub mod screens;

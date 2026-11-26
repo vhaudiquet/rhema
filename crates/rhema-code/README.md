@@ -121,7 +121,7 @@ The add dialog offers **Mistral API** for a pay-as-you-go or plan API key from `
 
 ### Saved sessions
 
-Every conversation checkpoints to disk as turns stream, through the same store ACP and `--save` use (`rhema-session-store-file`): one bare-JSON `Session` per file, written to a private temp file, fsynced, and renamed over the previous checkpoint. A crash mid-turn leaves the last committed boundary, never a half file. `/resume` lists the workspace's saved sessions from `<cache>/rhema/sessions/<encoded-workspace>/`, newest first, and shows each one's opening prompt, age and size. `ctrl-a` widens the list to every workspace, naming each row's workspace on its metadata line; `ctrl-a` again narrows it back.
+Every conversation checkpoints to disk as turns stream, through the same store ACP and `--save` use (`rhema-session-store-file`): one bare-JSON `Session` per file, written to a private temp file, fsynced, and renamed over the previous checkpoint. A crash mid-turn leaves the last committed boundary, never a half file. `/resume` lists the workspace's saved sessions from `<cache>/rhema/sessions/<encoded-workspace>/`, newest first, and shows each one's opening prompt, age and size. `ctrl-a` widens the list to every workspace, naming each row's workspace on its metadata line; `ctrl-a` again narrows it back. `--resume <file>` reopens a session by path from the command line. `--resume-or-new <file>` does the same and starts a fresh conversation at that path when nothing is there, which is what the terminal's program-resume record carries (see below): a restore must not turn into an error because the file is gone.
 
 ### Skills, sessions, etc.
 
@@ -212,6 +212,12 @@ The `bash` tool can run somewhere other than your host. The profile's `sandbox.k
 - `http`: commands run behind a `rhema-sandboxd` daemon named by `sandbox.url`, with an optional token.
 
 Your `SYSTEM.md` is copied into the sandbox at startup, and in the mount postures (`docker`, `lxd` containers) the discovered skills ride read-only mounts, the global skills directory alongside the workspace, so a skill you edit mid-session is the new text the next read sees; the seeded postures (`ssh`, `http`, `lxd` vms, `ecrou`) copy the skills in instead. Your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries. When the last rhema session using a rhema-created sandbox instance exits, the instance is stopped; an instance you named yourself in the profile is never stopped out from under you.
+
+### Program resume (OSC 7577)
+
+Rhema Code also tells the terminal how to bring this session back, following [Superlogical's program resume protocol](https://www.superlogical.com/rex/docs/build/program-resume): the record is the command `rhema --workspace <dir> --resume-or-new <session file>`, so a terminal that implements it (Rex) reopens the conversation after the emulator restarts instead of an empty prompt. The protocol is gated on the terminal setting `OSC7577_TOKEN`: where it is absent nothing is written at all, and a terminal that does not know the sequence ignores it anyway.
+
+The record follows the conversation: `/clear`, a `/resume` onto another file, and the first checkpoint of a fresh session each re-report. A clean quit removes it, since you ended that session; a crash, a panic, a SIGHUP and a SIGTERM leave it standing, which is the exit it exists for. The `bash` tool, the local sandbox, and the startup probes also remove `OSC7577_TOKEN` from their children, so nothing the model runs can register a record the terminal would later run unattended.
 
 ### Program status (OSC 7501)
 

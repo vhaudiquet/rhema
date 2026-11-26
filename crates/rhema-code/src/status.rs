@@ -121,7 +121,8 @@ fn msg_of(status: &Status) -> Option<&str> {
 /// Standard base64 (RFC 4648, with padding), the encoding the spec
 /// requires of `msg`. Written here rather than pulled in as a
 /// dependency: a few one-line strings per turn do not justify one.
-fn base64_of(data: &str) -> String {
+/// [`crate::resume`] encodes its argv elements the same way.
+pub(crate) fn base64_of(data: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = data.as_bytes();
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

@@ -97,7 +97,11 @@ fn migrate_stored_keys(config: &mut Config, secrets: Option<&dyn SecretStore>) {
 /// typed after the verb, and the top-level flag only fills the default.
 fn fold_into_run(mut run: RunArgs, args: &Args) -> RunArgs {
     run.profile = run.profile.take().or_else(|| args.profile.clone());
-    run.resume = run.resume.take().or_else(|| args.resume.clone());
+    run.resume = run
+        .resume
+        .take()
+        .or_else(|| args.resume.clone())
+        .or_else(|| args.resume_or_new.clone());
     run.save = run.save.take().or_else(|| args.save.clone());
     run.thinking = run.thinking.or(args.thinking);
     run.no_transcript |= args.no_transcript;
@@ -492,10 +496,32 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
                     }),
             },
         );
-    let session = match &args.resume {
-        Some(path) => HostAgent::load_session_from(path)
+    // A resume named by `--resume` is a path the user typed: a missing
+    // file is a mistake worth reporting. A resume named by the terminal
+    // comes from `--resume-or-new`, and its file may be gone by design
+    // (a run killed before its first checkpoint, a cache the user
+    // cleared), so that one starts a fresh conversation at the same
+    // path instead of dying on it. A file that exists but does not load
+    // is an error either way: silently starting over would discard the
+    // conversation the user came to resume.
+    let session = match (&args.resume, &args.resume_or_new) {
+        (Some(path), _) => HostAgent::load_session_from(path)
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
-        None => Session::default(),
+        (None, Some(path)) => match HostAgent::load_session_from(path) {
+            Ok(session) => session,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "warning: no session at {}; starting a fresh one there",
+                    path.display()
+                );
+                Session::default()
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("cannot resume session: {}", path.display()));
+            }
+        },
+        (None, None) => Session::default(),
     };
     // The file this conversation persists to: a resumed run continues
     // its own file, a fresh one gets a name from the sessions cache.
@@ -503,7 +529,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // so an exit in the middle of the first turn, a crash, a kill, a
     // quit, still leaves something to resume. Allocation only picks
     // the name; nothing is written until a turn commits.
-    let session_file = match &args.resume {
+    let session_file = match args.resume.as_ref().or(args.resume_or_new.as_ref()) {
         Some(path) => Some(path.clone()),
         None => match sessions::base_dir() {
             Ok(base) => sessions::next_session_path(&base, &workspace)
@@ -750,6 +776,14 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             eprintln!("warning: the session was not saved for /resume: {err}");
         }
     }
+    // The resume record goes with a clean quit, once the conversation is
+    // on disk: the user ended that session, and a terminal that restarts
+    // tomorrow should not revive it. A crash, a panic, and a signal death
+    // leave the record standing, which is the exit it exists for (the
+    // signal restore never comes through this path).
+    if outcome.is_ok() {
+        crate::resume::clear();
+    }
     // Stop-on-exit: the last session out of a rhema-derived instance
     // stops it; a peer's shared hold says otherwise and the instance
     // stays up. The terminal is already back, so the stop's wait (a
@@ -896,6 +930,9 @@ async fn event_loop(
     effects: &mut Vec<Effect>,
 ) -> anyhow::Result<()> {
     let mut status = Tracker::default();
+    // The terminal's record of the command that brings this session
+    // back, re-announced as `/clear` and `/resume` move the file.
+    let mut resume = crate::resume::Tracker::new();
     // The last logo rect the terminal graphics layer holds; the frame
     // below re-states its want every draw, and a change re-places the
     // image (a resize) or clears it (the wizard's screen went away).
@@ -916,6 +953,7 @@ async fn event_loop(
     }
     loop {
         status.sync(app);
+        resume.sync(app);
         terminal.draw(|frame| ui::render(app, frame))?;
         if app.logo_rect != logo_placed {
             match app.logo_rect {
