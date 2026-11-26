@@ -120,7 +120,11 @@ impl App {
                 self.fail_login(err);
                 return Vec::new();
             }
+            let followup =
+                crate::screens::CompanionProvider::from_config_name(backend.config_name())
+                    .and_then(|provider| self.companion_followup(provider, &tab, &instance));
             self.land_after_add(&instance);
+            self.provider_followup = followup;
             return Vec::new();
         }
         vec![Effect::FetchModels(FetchWhy::Login {
@@ -425,6 +429,16 @@ impl App {
                         if let Screen::Settings(settings) = &mut self.screen {
                             settings.dialog = None;
                         }
+                        // The gateway companions follow the login once
+                        // it lands, whichever host ran it. The question
+                        // waits until the chat is showing.
+                        self.provider_followup =
+                            crate::screens::CompanionProvider::from_config_name(
+                                backend.config_name(),
+                            )
+                            .and_then(|provider| {
+                                self.companion_followup(provider, &tab, &instance)
+                            });
                         // Where the login lands depends on the screen it
                         // came from: the settings flow opens the Models
                         // page (skipping straight to the chat on a

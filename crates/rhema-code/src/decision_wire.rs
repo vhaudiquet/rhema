@@ -574,6 +574,30 @@ mod tests {
         // case exercises, and app tests cover the gated path.
     }
 
+    #[test]
+    fn the_profiles_off_switch_closes_the_wiring() {
+        let mut profile = Profile::default();
+        let section = profile
+            .decision
+            .get_or_insert_with(rhema_config::DecisionSettings::default);
+        section.instances.insert(
+            "Jev".into(),
+            rhema_config::DecisionInstance {
+                provider: "jev".into(),
+                api_key: Some("k".into()),
+                secret_ref: None,
+                model: None,
+                account_id: None,
+                base_url: None,
+            },
+        );
+        profile.decision_enabled = Some(false);
+        assert!(
+            wire_for_session("personal", &profile, None, None, None).is_none(),
+            "a stored instance and its key stay out while the switch is off"
+        );
+    }
+
     #[tokio::test]
     async fn a_run_inside_a_runtime_does_not_panic() {
         // The binary's main is #[tokio::main], and the headless path

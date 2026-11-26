@@ -146,13 +146,14 @@ attaching after the command. `ShellTools` is untouched.
 
 ## 3. Configuration
 
-Two new fields on `Profile`, the framework's section of the stored
+Three fields on `Profile`, the framework's section of the stored
 settings, same file as the provider instances:
 
 ```yaml
 profiles:
   personal:
     # … provider, model, instances …
+    websearch_enabled: true
     websearch:
       brave-main:
         provider: brave
@@ -164,6 +165,10 @@ profiles:
     websearch_order: ["brave-main", "exa-work"]
 ```
 
+- `websearch_enabled: Option<bool>`, the profile's `search` switch.
+  Unset means on; false keeps every instance stored but hands the
+  agent no function and no prompt section. The settings page's switch
+  row and `/search on|off` write it.
 - `websearch: BTreeMap<String, WebSearchInstance>`, keyed by a
   user-chosen name, the `instances` twin. Absent from the file while
   empty.
@@ -355,7 +360,7 @@ crates/
                               + rhema-config (the profile assembly)
   rhema-bash/                 websearch module; no fleet dependency,
                               the function is strings
-  rhema-config/               WebSearchInstance, the two Profile fields,
+  rhema-config/               WebSearchInstance, the three Profile fields,
                               key-tier resolution
   rhema-host-agent/         the `websearch` prompt-section field
   rhema-code/                 __search mode, search_wire.rs (one wiring
@@ -411,8 +416,11 @@ jobs -> vision -> search -> MCP     (the BASH_ENV lineage)
 ```
 
 The gate is `sandboxed.is_none() && configured`, where `configured`
-is: the profile holds at least one instance whose key resolves, or
-any of the four environment variables is set. The gate needs the
+is: the profile's `websearch_enabled` is on (unset counts as on), and
+it holds at least one instance whose key resolves, or any of the four
+environment variables is set. The switch closes both tiers, so a
+disabled profile wires nothing even on a machine with an environment
+key. The gate needs the
 same resolution the mode runs, so it lives in one place,
 `search_wire.rs`, called by both. Sandboxed sessions get no function
 and no section, the vision rule.
@@ -426,7 +434,10 @@ position is a one-line move if it reads wrong). Rows, one per
 instance: chain position, instance name, kind, where the key lives
 (secret store, stored, environment). Actions:
 
-- `n`: add. The dialog asks kind (Brave, Exa, Tavily), instance name
+- Enter on the switch row: flip `websearch_enabled`, persist, and
+  rebuild the agent.
+- `n`: add. The dialog asks kind (Brave, Exa, Tavily, OpenCode),
+  instance name
   (default from the kind), API key (masked input). The key goes
   through `place_key`: secret store first, stored literal when the
   secret store refuses, the provider-key behavior. New instances append
@@ -436,9 +447,11 @@ instance: chain position, instance name, kind, where the key lives
 - An instance missing from the order renders at the bottom, marked
   not in chain; promoting it appends it.
 
-No off switch field: the off states are no instances, or an empty
-order. The persisted off switches exist where a discovered set needs
-muting; these instances are configured, not discovered.
+The switch is the feature's off state. No instances or an empty
+order is a lower-level off: the switch keeps the configuration and
+stops the wiring. An OpenCode login on the Providers page asks, once
+the credential lands, whether the same key should serve hosted
+search; yes appends the companion instance to `websearch_order`.
 
 **Later consumers.** The claw pulls the adapter crates and assembles
 a `Chain` behind its own profile policy; nothing in v1 changes for
@@ -453,7 +466,7 @@ One component per commit, scopes per AGENTS.md:
 2. `feat(websearch)`: the brave adapter (or whichever lands first;
    one commit per adapter).
 3. `feat(websearch)`: the registry crate.
-4. `feat(config)`: the two Profile fields, the instance type, key
+4. `feat(config)`: the three Profile fields, the instance type, key
    tiers.
 5. `feat(agent-tools)`: the macro, init file, prompt section.
 6. `feat(agent)`: the `websearch` config field and template section.

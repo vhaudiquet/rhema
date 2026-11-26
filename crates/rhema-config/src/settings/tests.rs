@@ -92,8 +92,10 @@ fn config_round_trips_through_disk_as_yaml() {
             Profile {
                 ignored_mcp_servers: serde_yaml::Value::Null,
                 sandbox_instances: BTreeMap::new(),
+                websearch_enabled: None,
                 websearch: BTreeMap::new(),
                 websearch_order: Vec::new(),
+                decision_enabled: None,
                 decision: None,
                 provider: Some("llama-cpp".into()),
                 instance: Some("home server".into()),

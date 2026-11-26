@@ -180,6 +180,10 @@ pub struct App {
     pub retryable: bool,
     /// The quit confirmation overlay is up.
     pub confirm_quit: bool,
+    /// The gateway add-on question that follows a provider login:
+    /// decision models first, then web search where the gateway serves
+    /// it. `y` adds the companion instance, `n` skips it.
+    pub provider_followup: Option<crate::screens::ProviderFollowUp>,
     /// The cancel handle of the running login flow; `None` while idle.
     /// Dropping it ends the flow task, the watch receiver errors out,
     /// exactly what Esc and a completed flow both want.
@@ -693,6 +697,7 @@ impl App {
             error: None,
             retryable: false,
             confirm_quit: false,
+            provider_followup: None,
             login_cancel: None,
             session_file: setup.checkpoint,
             sessions_base: setup.sessions_base,

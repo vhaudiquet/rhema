@@ -101,6 +101,7 @@ impl App {
         if !matches!(self.screen, Screen::Chat)
             || self.turn.pending_approval.is_some()
             || self.confirm_quit
+            || self.provider_followup.is_some()
         {
             return;
         }
@@ -504,6 +505,10 @@ impl App {
                 }
             }
             SettingsAction::RemoveMcpServer => self.remove_mcp_server(),
+            SettingsAction::ToggleWebSearch => {
+                self.set_websearch_enabled(!self.effective().is_websearch_enabled());
+                Vec::new()
+            }
             SettingsAction::OpenWebSearchDialog => {
                 self.open_websearch_dialog();
                 Vec::new()
@@ -517,6 +522,10 @@ impl App {
             }
             SettingsAction::MoveWebSearchDown => {
                 self.move_websearch_provider(false);
+                Vec::new()
+            }
+            SettingsAction::ToggleDecision => {
+                self.set_decision_enabled(!self.effective().is_decision_enabled());
                 Vec::new()
             }
             SettingsAction::OpenDecisionDialog => {
@@ -716,6 +725,14 @@ impl App {
             match key.code {
                 KeyCode::Char('y' | 'Y') => self.turn.answer(true),
                 KeyCode::Char('n' | 'N') => self.turn.answer(false),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if self.provider_followup.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => self.answer_provider_followup(true),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer_provider_followup(false),
                 _ => {}
             }
             return Vec::new();

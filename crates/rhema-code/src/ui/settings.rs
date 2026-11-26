@@ -823,18 +823,41 @@ pub(crate) fn settings_page(
             )
         }
         SettingsSection::WebSearch => {
+            let mut row_hits = Vec::new();
+            // The switch leads: one row, plain state, both provider
+            // tiers under it. `search` is wired only when it is on.
+            let selected = settings.row == 0;
+            row_hits.push((lines.len(), SettingsHit::PageRow(0)));
+            lines.push(settings_row(
+                Line::from(vec![
+                    super::chrome::marker(selected, theme),
+                    Span::raw("Web search").fg(theme.text),
+                    Span::raw("  ").fg(theme.text3),
+                    Span::raw(if settings.websearch_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    })
+                    .fg(if settings.websearch_enabled {
+                        theme.ok
+                    } else {
+                        theme.text3
+                    }),
+                ]),
+                selected,
+                theme,
+            ));
             // The rows always carry their add row; empty means no
             // provider above it.
             if settings.websearch.iter().all(|row| row.add) {
                 lines.extend(settings_hint("no providers in this profile", theme, width));
                 lines.extend(settings_hint(
                     "the add row below installs one, or export a BRAVE_SEARCH_API_KEY / \
-                     EXA_API_KEY / TAVILY_API_KEY",
+                     EXA_API_KEY / TAVILY_API_KEY / OPENCODE_API_KEY",
                     theme,
                     width,
                 ));
             }
-            let mut row_hits = Vec::new();
             for (index, row) in settings.websearch.iter().enumerate() {
                 // The add row is the sentinel closing the vec; the
                 // hand-built line below renders it, the loop draws
@@ -842,8 +865,9 @@ pub(crate) fn settings_page(
                 if row.add {
                     continue;
                 }
-                let selected = index == settings.row;
-                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let visual = index + 1;
+                let selected = visual == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(visual)));
                 // The position is the chain's truth: `search` walks
                 // 1.., first success wins. An unordered row lists
                 // dim, inert, and `[` enrolls it.
@@ -861,10 +885,9 @@ pub(crate) fn settings_page(
                 ]);
                 lines.push(settings_row(line, selected, theme));
             }
-            // The add row is the sentinel closing the vec: its index
-            // is the last, not the len — a len index is out of range,
-            // and the click would land nowhere.
-            let add = settings.websearch.len().saturating_sub(1);
+            // The switch row shifts the vec's indexes by one: the
+            // sentinel's row is the vec's last index plus one.
+            let add = settings.websearch.len();
             let selected = settings.row == add;
             row_hits.push((lines.len(), SettingsHit::PageRow(add)));
             lines.push(settings_row(
@@ -878,11 +901,34 @@ pub(crate) fn settings_page(
             lines.push(Line::default());
             (
                 lines,
-                footer("k up \u{b7} j down \u{b7} d removes \u{b7} the add row installs one"),
+                footer("enter toggles the switch \u{b7} k up \u{b7} j down \u{b7} d removes"),
                 row_hits,
             )
         }
         SettingsSection::Decision => {
+            let mut row_hits = Vec::new();
+            // The switch row leads, the web search page's shape.
+            let selected = settings.row == 0;
+            row_hits.push((lines.len(), SettingsHit::PageRow(0)));
+            lines.push(settings_row(
+                Line::from(vec![
+                    super::chrome::marker(selected, theme),
+                    Span::raw("Decision models").fg(theme.text),
+                    Span::raw("  ").fg(theme.text3),
+                    Span::raw(if settings.decision_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    })
+                    .fg(if settings.decision_enabled {
+                        theme.ok
+                    } else {
+                        theme.text3
+                    }),
+                ]),
+                selected,
+                theme,
+            ));
             if settings.decision.iter().all(|row| row.add) {
                 lines.extend(settings_hint(
                     "no decision models in this profile",
@@ -890,7 +936,6 @@ pub(crate) fn settings_page(
                     width,
                 ));
             }
-            let mut row_hits = Vec::new();
             for (index, row) in settings.decision.iter().enumerate() {
                 // The add row is the sentinel closing the vec; the
                 // hand-built line below renders it, the loop draws
@@ -898,8 +943,9 @@ pub(crate) fn settings_page(
                 if row.add {
                     continue;
                 }
-                let selected = index == settings.row;
-                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let visual = index + 1;
+                let selected = visual == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(visual)));
                 // The kind shows as stored, the file's spelling, the
                 // web search rows' rule.
                 let mut detail = format!("{} · {}", row.kind, row.model);
@@ -926,7 +972,7 @@ pub(crate) fn settings_page(
                         .map(|(index, line)| settings_row(line, selected && index == 0, theme)),
                 );
             }
-            let add = settings.decision.len().saturating_sub(1);
+            let add = settings.decision.len();
             let selected = settings.row == add;
             row_hits.push((lines.len(), SettingsHit::PageRow(add)));
             lines.push(settings_row(
@@ -940,7 +986,7 @@ pub(crate) fn settings_page(
             lines.push(Line::default());
             (
                 lines,
-                footer("enter sets the default · d removes"),
+                footer("enter toggles the switch, sets the default · d removes"),
                 row_hits,
             )
         }

@@ -48,7 +48,10 @@ pub use palette::{
 };
 pub use picker::{PickerScreen, ResumeAction, ResumeRow, ResumeScreen};
 pub use profiles::{ProfileAction, ProfileRow, ProfileScreen, profile_rows};
-pub use providers::{LoginProvider, PROVIDERS, ProviderCategory, ProviderEntry, providers_in};
+pub use providers::{
+    CompanionProvider, LoginProvider, PROVIDERS, ProviderCategory, ProviderEntry, ProviderFollowUp,
+    providers_in,
+};
 pub use settings::{
     InstanceRow, SettingsAction, SettingsScreen, SettingsSection, SkillRow, SkillSource,
     SubagentRow, SubagentSource, UpdateCheck, UpdateInstall, UpdatePage,

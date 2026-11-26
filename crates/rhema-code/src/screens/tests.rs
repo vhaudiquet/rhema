@@ -3234,16 +3234,17 @@ fn the_websearch_add_row_is_the_last_row() {
         },
     )]);
     let mut screen = websearch_screen(instances, &["brave-main"]);
-    // brave-main, then the add row; the next Down wraps to the top
-    // instead of stopping on a row the page never draws.
+    // The switch leads, then brave-main, then the add row; the next
+    // Down wraps to the switch instead of stopping on a row the page
+    // never draws.
+    assert_eq!(screen.row, 0, "the switch row");
     screen.handle_key(key(KeyCode::Down));
-    assert_eq!(screen.selected_websearch(), None, "the add row");
+    assert_eq!(screen.selected_websearch(), Some("brave-main"));
     screen.handle_key(key(KeyCode::Down));
-    assert_eq!(
-        screen.selected_websearch(),
-        Some("brave-main"),
-        "the add row is the last row"
-    );
+    assert_eq!(screen.row, 2, "the add row");
+    assert_eq!(screen.selected_websearch(), None);
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.row, 0, "the add row is the last row");
 }
 
 #[test]
@@ -3308,7 +3309,11 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
         ),
     ]);
     let mut screen = websearch_screen(instances, &["brave-main"]);
-    // Down: brave-main, then the inert exa-work, then the add row.
+    // Row zero is the switch; Down: brave-main, then the inert
+    // exa-work, then the add row.
+    assert_eq!(screen.row, 0);
+    assert_eq!(screen.selected_websearch(), None);
+    screen.handle_key(key(KeyCode::Down));
     assert_eq!(screen.selected_websearch(), Some("brave-main"));
     screen.handle_key(key(KeyCode::Down));
     assert_eq!(
@@ -3317,6 +3322,7 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
         "the inert row is selectable"
     );
     screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.row, 3, "the add row");
     assert_eq!(screen.selected_websearch(), None, "the add row");
     assert_eq!(
         screen.handle_key(key(KeyCode::Enter)),
@@ -3330,7 +3336,7 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
     );
     assert!(screen.websearch_dialog.is_none(), "esc closed the dialog");
     // d arms the removal confirm; y carries it, n and esc leave the
-    // row alone.
+    // row alone. Up from the add row lands on exa-work.
     screen.handle_key(key(KeyCode::Up));
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('d'))),
@@ -3345,10 +3351,10 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
         screen.handle_key(key(KeyCode::Char('y'))),
         SettingsAction::RemoveWebSearchProvider
     );
-    // j and k reorder, vim's pair: k up, j down. The add row does
-    // neither; the inert row carries both actions, the app layer
-    // decides what they mean there.
-    screen.row = 0;
+    // j and k reorder, vim's pair: k up, j down. The switch and the
+    // add row do neither; the inert provider carries both actions,
+    // the app layer decides what they mean there.
+    screen.row = 1;
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('k'))),
         SettingsAction::MoveWebSearchUp
@@ -3357,7 +3363,13 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
         screen.handle_key(key(KeyCode::Char('j'))),
         SettingsAction::MoveWebSearchDown
     );
-    screen.row = 2;
+    screen.row = 0;
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('k'))),
+        SettingsAction::None,
+        "the switch does not reorder"
+    );
+    screen.row = 3;
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('k'))),
         SettingsAction::None,
@@ -3371,6 +3383,18 @@ fn the_websearch_page_moves_over_the_rows_and_acts() {
     // The other pages are untouched.
     screen.section = SettingsSection::Providers;
     assert_eq!(screen.selected_websearch(), None);
+}
+
+#[test]
+fn the_websearch_switch_is_the_first_row() {
+    let mut screen = websearch_screen(BTreeMap::new(), &[]);
+    screen.websearch_enabled = false;
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Enter)),
+        SettingsAction::ToggleWebSearch
+    );
+    assert_eq!(screen.handle_key(key(KeyCode::Down)), SettingsAction::None);
+    assert_eq!(screen.row, 1, "the add row after the switch");
 }
 
 #[test]
@@ -3546,6 +3570,10 @@ fn the_decision_page_enters_the_default_and_removes_after_the_confirm() {
         );
     }
     let mut screen = decision_screen(section);
+    // The switch leads; Down reaches the instances.
+    assert_eq!(screen.row, 0);
+    assert_eq!(screen.selected_decision(), None, "the switch row");
+    screen.handle_key(key(KeyCode::Down));
     assert_eq!(screen.selected_decision(), Some("Jev"));
     assert_eq!(
         screen.handle_key(key(KeyCode::Enter)),
@@ -3555,6 +3583,7 @@ fn the_decision_page_enters_the_default_and_removes_after_the_confirm() {
     screen.handle_key(key(KeyCode::Down));
     assert_eq!(screen.selected_decision(), Some("Jev 2"));
     screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.row, 3, "the add row");
     assert_eq!(screen.selected_decision(), None, "the add row");
     assert_eq!(
         screen.handle_key(key(KeyCode::Enter)),
@@ -3568,8 +3597,10 @@ fn the_decision_page_enters_the_default_and_removes_after_the_confirm() {
         SettingsAction::CloseDecisionDialog
     );
     assert!(screen.decision_dialog.is_none());
-    // Down again wraps to the top; d arms the confirm, n leaves the
-    // row, y carries the removal out.
+    // Down wraps to the switch, then to the first instance; d arms
+    // the confirm, n leaves the row, y carries the removal out.
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.row, 0, "wrap to the switch");
     screen.handle_key(key(KeyCode::Down));
     assert_eq!(screen.selected_decision(), Some("Jev"));
     assert_eq!(
@@ -3588,9 +3619,14 @@ fn the_decision_page_enters_the_default_and_removes_after_the_confirm() {
         screen.handle_key(key(KeyCode::Char('y'))),
         SettingsAction::RemoveDecisionProvider
     );
-    // The add row never removes.
-    screen.handle_key(key(KeyCode::Down));
-    screen.handle_key(key(KeyCode::Down));
+    // The switch and the add row never remove.
+    screen.row = 0;
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('d'))),
+        SettingsAction::None,
+        "the switch has nothing to remove"
+    );
+    screen.row = 3;
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('d'))),
         SettingsAction::None,
@@ -3601,6 +3637,18 @@ fn the_decision_page_enters_the_default_and_removes_after_the_confirm() {
     screen.row = 0;
     screen.section = SettingsSection::Providers;
     assert_eq!(screen.selected_decision(), None);
+}
+
+#[test]
+fn the_decision_switch_is_the_first_row() {
+    let mut screen = decision_screen(rhema_config::DecisionSettings::default());
+    screen.decision_enabled = false;
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Enter)),
+        SettingsAction::ToggleDecision
+    );
+    assert_eq!(screen.handle_key(key(KeyCode::Down)), SettingsAction::None);
+    assert_eq!(screen.row, 1, "the add row after the switch");
 }
 
 fn type_chars(dialog: &mut crate::screens::AddDecisionDialog, text: &str) {

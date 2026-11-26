@@ -228,12 +228,19 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
     let secrets = rhema_config::Home::discover()
         .ok()
         .map(|home| home.secret_store());
+    if !profile.is_websearch_enabled() {
+        eprintln!(
+            "search: web search is disabled in profile \"{profile_name}\" (\"/search on\" \
+             re-enables it)"
+        );
+        return 1;
+    }
     let Some(chain) = rhema_websearch_registry::assemble_chain(Some(&profile), secrets.as_deref())
     else {
         eprintln!(
             "search: no provider is configured for profile \"{profile_name}\" (settings \
-             > Providers > Web search, or a BRAVE_SEARCH_API_KEY / EXA_API_KEY / TAVILY_API_KEY \
-             environment variable)"
+             > Web search, or a BRAVE_SEARCH_API_KEY / EXA_API_KEY / TAVILY_API_KEY / \
+             OPENCODE_API_KEY environment variable)"
         );
         return 1;
     };
@@ -356,6 +363,25 @@ mod tests {
         // The sandbox case needs a Sandboxed handle, the assembly's
         // own; its None arm is the same early return the providerless
         // case exercises, and app tests cover the gated path.
+    }
+
+    #[test]
+    fn the_profiles_off_switch_closes_the_wiring() {
+        let mut profile = Profile::default();
+        profile.websearch.insert(
+            "brave-main".into(),
+            rhema_config::WebSearchInstance {
+                provider: "brave".into(),
+                api_key: Some("k".into()),
+                secret_ref: None,
+            },
+        );
+        profile.websearch_order.push("brave-main".into());
+        profile.websearch_enabled = Some(false);
+        assert!(
+            wire_for_session("personal", &profile, None, None, None).is_none(),
+            "a stored provider and its key stay out while the switch is off"
+        );
     }
 
     #[test]

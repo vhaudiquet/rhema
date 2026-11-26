@@ -16,7 +16,8 @@ use rhema_core::Image;
 use std::path::Path;
 
 use dialogs::{
-    render_approval_modal, render_confirm_quit, render_profile_picker, render_resume_picker,
+    render_approval_modal, render_confirm_quit, render_profile_picker, render_provider_followup,
+    render_resume_picker,
 };
 use footer::render_footer;
 use input::{input_rows, render_input};
@@ -199,6 +200,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             if app.confirm_quit {
                 occlusions.push(centered(34, 3, frame.area()));
             }
+            if app.provider_followup.is_some() {
+                occlusions.push(centered(68, 5, frame.area()));
+            }
             let profiles = app.palette_profiles();
             let sandboxes = app.palette_sandboxes();
             let palette_rows = crate::screens::palette_rows_cached(
@@ -220,6 +224,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 render_approval_modal(frame, call, &theme);
             } else if app.confirm_quit {
                 render_confirm_quit(frame, &theme);
+            } else if let Some(followup) = &app.provider_followup {
+                render_provider_followup(frame, followup, &theme);
             }
         }
     }

@@ -32,6 +32,26 @@ fn debug_prints_presence_never_the_key() {
 }
 
 #[test]
+fn the_feature_switches_default_on_and_store_an_explicit_off() {
+    let profile = Profile::default();
+    assert!(profile.is_websearch_enabled());
+    assert!(profile.is_decision_enabled());
+    let off = Profile {
+        websearch_enabled: Some(false),
+        decision_enabled: Some(false),
+        ..Profile::default()
+    };
+    assert!(!off.is_websearch_enabled());
+    assert!(!off.is_decision_enabled());
+    let yaml = serde_yaml::to_string(&off).unwrap();
+    assert!(yaml.contains("websearch_enabled: false"), "{yaml}");
+    assert!(yaml.contains("decision_enabled: false"), "{yaml}");
+    let back: Profile = serde_yaml::from_str(&yaml).unwrap();
+    assert!(!back.is_websearch_enabled());
+    assert!(!back.is_decision_enabled());
+}
+
+#[test]
 fn anthropic_and_openai_profiles_need_their_own_key_to_serve() {
     let keyed = |provider: &str| {
         let mut profile = Profile {

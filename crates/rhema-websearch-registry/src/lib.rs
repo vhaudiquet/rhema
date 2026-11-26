@@ -189,6 +189,11 @@ fn selections_with(
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,
 ) -> Vec<(String, String, String)> {
+    // The profile's off switch closes both tiers: a disable means no
+    // function, even on a machine whose environment carries a key.
+    if profile.is_some_and(|profile| !profile.is_websearch_enabled()) {
+        return Vec::new();
+    }
     let mut selections = Vec::new();
     if let Some(profile) = profile {
         for (name, instance) in profile.websearch_chain() {
@@ -293,6 +298,22 @@ mod assembly_tests {
         assert!(would_wire_with(env, None, None));
         assert!(assemble_chain_with(env, None, None).is_some());
         assert!(!would_wire_with(|_| None, None, None));
+    }
+
+    #[test]
+    fn the_profiles_switch_closes_both_tiers() {
+        let mut profile = Profile::default();
+        profile
+            .websearch
+            .insert("exa-work".into(), instance("exa", Some("k")));
+        profile.websearch_order = vec!["exa-work".into()];
+        profile.websearch_enabled = Some(false);
+        let env = |name: &str| (name == "EXA_API_KEY").then(|| "env".to_owned());
+        assert!(
+            assemble_chain_with(env, Some(&profile), None).is_none(),
+            "a stored provider and an env key both stay out"
+        );
+        assert!(!would_wire_with(env, Some(&profile), None));
     }
 
     #[test]

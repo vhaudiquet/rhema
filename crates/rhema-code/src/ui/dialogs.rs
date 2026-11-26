@@ -606,6 +606,40 @@ pub(crate) fn render_confirm_quit(frame: &mut Frame, theme: &Theme) {
     );
 }
 
+/// The gateway companion question: one small box asking whether the
+/// key that just landed should also serve decision models or web
+/// search, `y` adds, `n` and esc skip, the quit confirm's shape.
+pub(crate) fn render_provider_followup(
+    frame: &mut Frame,
+    followup: &crate::screens::ProviderFollowUp,
+    theme: &Theme,
+) {
+    let area = centered(68, 5, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border_strong))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
+        .title(followup.title());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(followup.question()).fg(theme.text),
+            Line::from(followup.detail()).fg(theme.text3),
+            Line::from(vec![
+                Span::raw("y").bold(),
+                Span::raw(" add · "),
+                Span::raw("n").bold(),
+                Span::raw(" skip"),
+            ])
+            .fg(theme.text3),
+        ]),
+        inner,
+    );
+}
+
 /// The staged add dialog the settings pages share: the web search
 /// and decision providers' kind list on the kind stage, the one input
 /// line on every other (a key line masked to its length, the

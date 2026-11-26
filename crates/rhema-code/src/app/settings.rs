@@ -40,10 +40,12 @@ impl App {
         settings.update = self.update.clone();
         settings.mcp =
             crate::screens::mcp_server_rows(self.mcp.entries(), &self.disabled_mcp_servers);
+        settings.websearch_enabled = settings.stored.is_websearch_enabled();
         settings.websearch = crate::screens::websearch_rows(
             &settings.stored.websearch,
             &settings.stored.websearch_order,
         );
+        settings.decision_enabled = settings.stored.is_decision_enabled();
         settings.decision = crate::screens::decision_rows(
             settings.stored.decision.as_ref(),
             self.secrets.as_deref(),
@@ -309,6 +311,306 @@ impl App {
         Vec::new()
     }
 
+    /// Ask whether the same gateway key should serve decision models.
+    /// `None` when the profile already holds a decision instance of
+    /// that kind, so a second login does not repeat the question.
+    fn companion_decision_followup(
+        &self,
+        provider: crate::screens::CompanionProvider,
+        profile: &str,
+        instance: &str,
+    ) -> Option<crate::screens::ProviderFollowUp> {
+        let effective = self.config.effective(Some(profile));
+        let covered = effective.decision.as_ref().is_some_and(|section| {
+            section
+                .instances
+                .values()
+                .any(|entry| entry.provider == provider.config_name())
+        });
+        (!covered).then(|| crate::screens::ProviderFollowUp::Decision {
+            provider,
+            profile: profile.to_owned(),
+            instance: instance.to_owned(),
+        })
+    }
+
+    /// Ask whether the same gateway key should serve hosted web search.
+    /// `None` when the kind has no search route or the profile already
+    /// holds one.
+    fn companion_websearch_followup(
+        &self,
+        provider: crate::screens::CompanionProvider,
+        profile: &str,
+        instance: &str,
+    ) -> Option<crate::screens::ProviderFollowUp> {
+        if !provider.supports_websearch() {
+            return None;
+        }
+        let effective = self.config.effective(Some(profile));
+        let covered = effective
+            .websearch
+            .values()
+            .any(|entry| entry.provider == provider.config_name());
+        (!covered).then(|| crate::screens::ProviderFollowUp::WebSearch {
+            provider,
+            profile: profile.to_owned(),
+            instance: instance.to_owned(),
+        })
+    }
+
+    /// The questions that follow a gateway login: decision models
+    /// first, then web search when the gateway serves it. Both skip
+    /// when the profile already has that companion.
+    pub(crate) fn companion_followup(
+        &self,
+        provider: crate::screens::CompanionProvider,
+        profile: &str,
+        instance: &str,
+    ) -> Option<crate::screens::ProviderFollowUp> {
+        self.companion_decision_followup(provider, profile, instance)
+            .or_else(|| self.companion_websearch_followup(provider, profile, instance))
+    }
+
+    /// Answers the current follow-up question: `yes` writes the
+    /// companion instance, then the next question (if any) replaces
+    /// this one.
+    pub(crate) fn answer_provider_followup(&mut self, yes: bool) {
+        let Some(followup) = self.provider_followup.take() else {
+            return;
+        };
+        if yes {
+            match &followup {
+                crate::screens::ProviderFollowUp::Decision {
+                    provider,
+                    profile,
+                    instance,
+                } => self.add_companion_decision(*provider, profile, instance),
+                crate::screens::ProviderFollowUp::WebSearch {
+                    provider,
+                    profile,
+                    instance,
+                } => self.add_companion_websearch(*provider, profile, instance),
+            }
+        }
+        if let crate::screens::ProviderFollowUp::Decision {
+            provider,
+            profile,
+            instance,
+        } = &followup
+        {
+            self.provider_followup =
+                self.companion_websearch_followup(*provider, profile, instance);
+        }
+    }
+
+    /// Adds the gateway's decision route under the same key: the
+    /// instance named after the provider login, the key placed through
+    /// the secret store, and the default set when the section had
+    /// none. Persisted with the provider's save.
+    fn add_companion_decision(
+        &mut self,
+        provider: crate::screens::CompanionProvider,
+        profile: &str,
+        instance: &str,
+    ) {
+        let (key, base_url) = {
+            let effective = self.config.effective(Some(profile));
+            let Some(stored) = effective.instances.get(instance) else {
+                self.transcript.push_notice(&format!(
+                    "cannot add decision models: {instance} is no longer in {profile}"
+                ));
+                return;
+            };
+            let Some(key) = effective.instance_api_key(stored, self.secret_store()) else {
+                self.transcript.push_notice(&format!(
+                    "cannot add decision models: {instance} has no key"
+                ));
+                return;
+            };
+            let base_url = (provider == crate::screens::CompanionProvider::OpenCode)
+                .then(|| opencode_decision_root(stored.base_url.as_deref()))
+                .flatten();
+            (key, base_url)
+        };
+        let secrets = self.secrets.clone();
+        let mut added = None;
+        let kind = provider.config_name();
+        self.config.set_for_profile(Some(profile), |settings| {
+            let named = {
+                let section = settings
+                    .decision
+                    .get_or_insert_with(rhema_config::DecisionSettings::default);
+                let name = companion_name(
+                    instance,
+                    &section.instances.keys().cloned().collect::<Vec<_>>(),
+                );
+                section.instances.insert(
+                    name.clone(),
+                    rhema_config::DecisionInstance {
+                        provider: kind.to_owned(),
+                        api_key: None,
+                        secret_ref: None,
+                        model: None,
+                        account_id: None,
+                        base_url: base_url.clone(),
+                    },
+                );
+                if section.instance.is_none() {
+                    section.instance = Some(name.clone());
+                }
+                name
+            };
+            settings.place_decision_key(&named, &key, secrets.as_deref());
+            added = Some(named);
+        });
+        if !self.save_config() {
+            return;
+        }
+        let _ = self.rebuild_live_agent(false);
+        if let Some(name) = added {
+            self.transcript.push_notice(&format!(
+                "added {} decision models as {name}, saved",
+                provider.display_name()
+            ));
+        }
+    }
+
+    /// Adds the gateway's hosted search instance under the same key,
+    /// at the end of the profile's chain.
+    fn add_companion_websearch(
+        &mut self,
+        provider: crate::screens::CompanionProvider,
+        profile: &str,
+        instance: &str,
+    ) {
+        if !provider.supports_websearch() {
+            return;
+        }
+        let key = {
+            let effective = self.config.effective(Some(profile));
+            let Some(stored) = effective.instances.get(instance) else {
+                self.transcript.push_notice(&format!(
+                    "cannot add web search: {instance} is no longer in {profile}"
+                ));
+                return;
+            };
+            let Some(key) = effective.instance_api_key(stored, self.secret_store()) else {
+                self.transcript
+                    .push_notice(&format!("cannot add web search: {instance} has no key"));
+                return;
+            };
+            key
+        };
+        let secrets = self.secrets.clone();
+        let mut added = None;
+        let kind = provider.config_name();
+        self.config.set_for_profile(Some(profile), |settings| {
+            let name = companion_name(
+                instance,
+                &settings.websearch.keys().cloned().collect::<Vec<_>>(),
+            );
+            settings.websearch.insert(
+                name.clone(),
+                rhema_config::WebSearchInstance {
+                    provider: kind.to_owned(),
+                    api_key: None,
+                    secret_ref: None,
+                },
+            );
+            settings.place_websearch_key(&name, &key, secrets.as_deref());
+            if !settings.websearch_order.contains(&name) {
+                settings.websearch_order.push(name.clone());
+            }
+            added = Some(name);
+        });
+        if !self.save_config() {
+            return;
+        }
+        let _ = self.rebuild_live_agent(false);
+        if let Some(name) = added {
+            self.transcript.push_notice(&format!(
+                "added {} web search as {name}, saved",
+                provider.display_name()
+            ));
+        }
+    }
+
+    /// Flips the profile's `search` switch: persisted, the open page's
+    /// row follows, and the running agent rebuilds so the function and
+    /// prompt section appear or go. A running turn defers the rebuild
+    /// to its end, the other mid-turn toggles' rule.
+    pub(crate) fn set_websearch_enabled(&mut self, enabled: bool) {
+        if self.effective().is_websearch_enabled() == enabled {
+            let state = if enabled { "on" } else { "off" };
+            self.transcript
+                .push_notice(&format!("web search is already {state}"));
+            return;
+        }
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                profile.websearch_enabled = Some(enabled);
+            });
+        if !self.save_config() {
+            return;
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.websearch_enabled = enabled;
+        }
+        let rebuilt = self.rebuild_live_agent(false);
+        let providers = self.effective().websearch.len();
+        let state = if enabled { "on" } else { "off" };
+        if enabled && providers == 0 {
+            self.transcript.push_notice(&format!(
+                "web search {state}, but this profile has no provider; add one in settings"
+            ));
+        } else {
+            self.transcript.push_notice(&format!("web search {state}"));
+        }
+        if let Err(err) = rebuilt {
+            self.error = Some(err);
+        }
+    }
+
+    /// Flips the profile's `decide` switch, the web search switch's
+    /// twin: persisted, the open page follows, the agent rebuilds.
+    pub(crate) fn set_decision_enabled(&mut self, enabled: bool) {
+        if self.effective().is_decision_enabled() == enabled {
+            let state = if enabled { "on" } else { "off" };
+            self.transcript
+                .push_notice(&format!("decision models are already {state}"));
+            return;
+        }
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                profile.decision_enabled = Some(enabled);
+            });
+        if !self.save_config() {
+            return;
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.decision_enabled = enabled;
+        }
+        let rebuilt = self.rebuild_live_agent(false);
+        let configured = self
+            .effective()
+            .decision
+            .as_ref()
+            .is_some_and(|section| !section.instances.is_empty())
+            || rhema_decision_registry::is_configured(Some(&self.effective()), self.secret_store());
+        let state = if enabled { "on" } else { "off" };
+        if enabled && !configured {
+            self.transcript.push_notice(&format!(
+                "decision models {state}, but this profile has no provider; add one in settings"
+            ));
+        } else {
+            self.transcript
+                .push_notice(&format!("decision models {state}"));
+        }
+        if let Err(err) = rebuilt {
+            self.error = Some(err);
+        }
+    }
+
     /// Rebuilds the web search page's snapshot from the config,
     /// keeping the selection inside the shrunken list. A no-op when
     /// the settings screen is not open.
@@ -318,13 +620,13 @@ impl App {
         };
         settings.websearch_dialog = None;
         settings.stored = self.config.effective(self.session_profile.as_deref());
+        settings.websearch_enabled = settings.stored.is_websearch_enabled();
         settings.websearch = crate::screens::websearch_rows(
             &settings.stored.websearch,
             &settings.stored.websearch_order,
         );
-        // The rows carry their add row; the MCP equivalent below has
-        // to add one because its rows do not.
-        let rows = settings.websearch.len();
+        // The rows carry their add row; the switch row leads.
+        let rows = settings.websearch.len() + 1;
         if settings.row >= rows {
             settings.row = rows.saturating_sub(1);
         }
@@ -493,9 +795,10 @@ impl App {
         };
         settings.decision_dialog = None;
         settings.stored = self.config.effective(self.session_profile.as_deref());
+        settings.decision_enabled = settings.stored.is_decision_enabled();
         settings.decision =
             crate::screens::decision_rows(settings.stored.decision.as_ref(), secrets.as_deref());
-        let rows = settings.decision.len();
+        let rows = settings.decision.len() + 1;
         if settings.row >= rows {
             settings.row = rows.saturating_sub(1);
         }
@@ -1050,4 +1353,29 @@ impl App {
         self.transcript
             .push_markdown(format!("```markdown\n{prompt}```"));
     }
+}
+
+/// The first free instance name: `base`, then `base 2`, `base 3`.
+/// Companion instances live in their own maps, so the provider login's
+/// name is the first choice.
+fn companion_name(base: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|name| name == base) {
+        return base.to_owned();
+    }
+    let mut number = 2;
+    loop {
+        let candidate = format!("{base} {number}");
+        if !taken.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+/// The decision root for an OpenCode login: the turn base ends in
+/// `/openai/v1`, and System One hangs off the root above it. Only a
+/// Go route returns one; Console's default is the adapter's own.
+fn opencode_decision_root(base_url: Option<&str>) -> Option<String> {
+    let root = base_url?.trim_end_matches('/').strip_suffix("/openai/v1")?;
+    root.contains("/inference/go").then(|| root.to_owned())
 }

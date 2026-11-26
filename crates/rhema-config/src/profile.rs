@@ -57,6 +57,12 @@ pub struct Profile {
     /// never serializes, so the next save drops it.
     #[serde(default, skip_serializing, rename = "mcp_servers")]
     pub ignored_mcp_servers: serde_yaml::Value,
+    /// Whether this profile wires the `search` macro. Unset means on;
+    /// a false value keeps the providers stored but hands the agent no
+    /// function and no prompt section. The settings' Web search page
+    /// and `/search` write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websearch_enabled: Option<bool>,
     /// The web search providers this profile's agents reach, keyed by
     /// a user-chosen name, the [`ProviderInstance`] twin at search
     /// scale. Per profile by design, work and personal carry
@@ -70,6 +76,12 @@ pub struct Profile {
     /// inert. Absent from the file while empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub websearch_order: Vec<String>,
+    /// Whether this profile wires the `decide` macro. Unset means on;
+    /// a false value keeps the instances stored but hands the agent no
+    /// function and no prompt section. The settings' Decision models
+    /// page and `/decide` write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_enabled: Option<bool>,
     /// The decision models this profile's agents may ask through
     /// `decide`: the named instances and the default, the
     /// [`DecisionSettings`] section. Per profile by design, work and
@@ -94,8 +106,10 @@ impl fmt::Debug for Profile {
             .field("thinking", &self.thinking)
             .field("sandbox", &self.sandbox)
             .field("sandbox_instances", &self.sandbox_instances)
+            .field("websearch_enabled", &self.websearch_enabled)
             .field("websearch", &self.websearch)
             .field("websearch_order", &self.websearch_order)
+            .field("decision_enabled", &self.decision_enabled)
             .field("decision", &self.decision)
             .finish()
     }
@@ -359,6 +373,18 @@ impl Profile {
             &mut instance.api_key,
             &mut instance.secret_ref,
         ))
+    }
+
+    /// Whether the `search` macro is wired for this profile. Unset is
+    /// on, so a profile written before the toggle keeps its search.
+    pub fn is_websearch_enabled(&self) -> bool {
+        self.websearch_enabled.unwrap_or(true)
+    }
+
+    /// Whether the `decide` macro is wired for this profile. Unset is
+    /// on, so a profile written before the toggle keeps its decisions.
+    pub fn is_decision_enabled(&self) -> bool {
+        self.decision_enabled.unwrap_or(true)
     }
 
     /// The profile's web search chain: the instances of

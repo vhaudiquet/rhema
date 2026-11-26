@@ -183,10 +183,15 @@ one `decide` asks by default. The turn providers' shape (`instances`
 plus `instance`) under one heading, with the kind and the model
 riding the instance. A profile holds as many as it likes; no call
 falls from one to another, and nothing lets a call pick another.
+`decision_enabled: Option<bool>` is the profile's `decide` switch:
+unset means on, and false keeps every instance stored but hands the
+agent no function and no prompt section. The settings page's switch
+row and `/decide on|off` write it.
 
 ```yaml
 profiles:
   personal:
+    decision_enabled: true
     decision:
       instance: jev                  # the default; unset names the first
       instances:
@@ -469,10 +474,11 @@ jobs -> vision -> search -> decision -> MCP     (the BASH_ENV lineage)
 ```
 
 The gate is `sandboxed.is_none() && configured`, where `configured`
-is `is_configured(..)`: the profile holds a decision instance (even
-one that does not build, so the call reports the entry's problem
-rather than the function vanishing), or the environment serves a
-kind. The
+is `is_configured(..)`: the profile's `decision_enabled` is on (unset
+counts as on), and it holds a decision instance (even one that does
+not build, so the call reports the entry's problem rather than the
+function vanishing), or the environment serves a kind. The switch
+closes both tiers. The
 gate needs the same resolution the mode runs, so it lives in one
 place, `decision_wire.rs`, called by both.
 
@@ -492,14 +498,19 @@ place, `decision_wire.rs`, called by both.
   beside the web search ones in `app/settings.rs`: a submit places
   the key through `Profile::place_decision_key`, persists, and
   rebuilds the agent (the first instance flips the wiring gate);
-  enter on a row writes `decision.instance` and persists with no
+  enter on the switch row flips `decision_enabled` and rebuilds;
+  enter on an instance row writes `decision.instance` and persists with no
   rebuild, the mode reads the profile per call; a removal drops the
   instance, clears the default when it was the one, deletes the
   secret-store entry, drops an emptied section, and rebuilds when the
   last one went. The dialog's rendering is the web search dialog's,
   lifted into `render_staged_dialog` over the kind list and the one
-  input line. No slash command of its own: `/settings` is the way
-  in, as for Web search.
+  input line. `/decide` opens the page, and `/decide on|off` flips
+  the switch from the chat. An OpenRouter or OpenCode login on the
+  Providers page asks, once the credential lands, whether the same
+  key should serve decision models; yes writes an instance named
+  after the login, and OpenCode's Go row points that instance at the
+  Go root.
 
 **Later consumers.** The claw pulls the adapter crates and holds a
 provider behind the trait, resolved by its own profile policy. The cloud harness wires

@@ -3006,13 +3006,14 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Nineteen commands, six visible rows: ten downs put the
-        // selection on /retry, and the window must have followed it.
-        for _ in 0..10 {
+        // Twenty-one commands, six visible rows: twelve downs put
+        // the selection on /retry, and the window must have followed
+        // it.
+        for _ in 0..12 {
             app.chat
                 .handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         }
-        assert_eq!(app.chat.palette_index, 10);
+        assert_eq!(app.chat.palette_index, 12);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -4108,7 +4109,7 @@ fn the_websearch_page_renders_no_ghost_add_row() {
     // providers: no doubled click target.
     let add_hits = hits
         .iter()
-        .filter(|(_, hit)| matches!(hit, SettingsHit::PageRow(2)))
+        .filter(|(_, hit)| matches!(hit, SettingsHit::PageRow(3)))
         .count();
     assert_eq!(add_hits, 1, "one click target on the add row\n{text}");
 }
@@ -4179,16 +4180,16 @@ fn the_decision_page_renders_its_rows_and_one_add_row() {
         "one add row: {text}"
     );
     assert!(
-        text.contains("enter sets the default"),
+        text.contains("enter toggles the switch, sets the default"),
         "the footer hints: {text}"
     );
-    // Two instance rows plus the add row register their click
-    // targets.
+    // The switch, two instance rows, and the add row register their
+    // click targets.
     let page_rows = hits
         .iter()
         .filter(|(_, hit)| matches!(hit, SettingsHit::PageRow(_)))
         .count();
-    assert_eq!(page_rows, 3, "{hits:?}");
+    assert_eq!(page_rows, 4, "{hits:?}");
 }
 
 /// The empty page names the fact; the add row below it is the way
@@ -4326,13 +4327,13 @@ fn the_websearch_and_decision_pages_say_so_when_empty() {
         settings.websearch = crate::screens::websearch_rows(&BTreeMap::new(), &[]);
         settings.decision = crate::screens::decision_rows(None, None);
         let mut hits = Vec::new();
-        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal
             .draw(|frame| {
                 render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
             })
             .unwrap();
-        (0..12)
+        (0..16)
             .map(|y| {
                 (0..100)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())

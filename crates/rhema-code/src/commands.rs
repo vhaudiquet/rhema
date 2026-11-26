@@ -51,6 +51,18 @@ const THINKING_LEVELS: &[Choice] = &[
     },
 ];
 
+/// The two states `/search` and `/decide` take.
+const ON_OFF: &[Choice] = &[
+    Choice {
+        name: "on",
+        description: "wire it for this profile",
+    },
+    Choice {
+        name: "off",
+        description: "leave it out; the providers stay stored",
+    },
+];
+
 /// One row of the command table.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -96,6 +108,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "reasoning effort (type for suggestions)",
         argument: Argument::Choice(THINKING_LEVELS),
         handler: thinking,
+    },
+    CommandSpec {
+        name: "/search",
+        description: "web search on or off",
+        argument: Argument::Choice(ON_OFF),
+        handler: search,
+    },
+    CommandSpec {
+        name: "/decide",
+        description: "decision models on or off",
+        argument: Argument::Choice(ON_OFF),
+        handler: decide,
     },
     CommandSpec {
         name: "/login",
@@ -447,6 +471,30 @@ fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
             Vec::new()
         }
     }
+}
+
+fn search(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    match argument {
+        Some("on") => app.set_websearch_enabled(true),
+        Some("off") => app.set_websearch_enabled(false),
+        Some(other) => app.push_notice(&format!(
+            "unknown state {other:?}; use /search on or /search off"
+        )),
+        None => app.open_settings_at(crate::screens::SettingsSection::WebSearch),
+    }
+    Vec::new()
+}
+
+fn decide(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    match argument {
+        Some("on") => app.set_decision_enabled(true),
+        Some("off") => app.set_decision_enabled(false),
+        Some(other) => app.push_notice(&format!(
+            "unknown state {other:?}; use /decide on or /decide off"
+        )),
+        None => app.open_settings_at(crate::screens::SettingsSection::Decision),
+    }
+    Vec::new()
 }
 
 fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {

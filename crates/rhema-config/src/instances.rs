@@ -171,8 +171,8 @@ impl fmt::Debug for ProviderInstance {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct WebSearchInstance {
-    /// Which adapter serves this instance: `brave`, `exa`, or
-    /// `tavily`. Stored as given, unknown spellings are the
+    /// Which adapter serves this instance: `brave`, `exa`, `tavily`,
+    /// or `opencode`. Stored as given, unknown spellings are the
     /// consumer's to resolve or reject (the registry does, at use
     /// time, not load time).
     pub provider: String,

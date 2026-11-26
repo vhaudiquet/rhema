@@ -865,6 +865,79 @@ fn an_add_keeps_the_catalog_and_the_next_picker_refresh_merges_it() {
 }
 
 #[test]
+fn adding_opencode_in_the_settings_asks_the_companion_questions() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/login");
+    descend_to_credential(&mut h, LoginProvider::OpenCode);
+    for c in "oc-key".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    assert!(matches!(
+        h.app.provider_followup,
+        Some(crate::screens::ProviderFollowUp::Decision {
+            provider: crate::screens::CompanionProvider::OpenCode,
+            ..
+        })
+    ));
+    // y adds the decision route and leaves the search question up.
+    h.app.on_key(key(KeyCode::Char('y')));
+    let stored = h.store.load().unwrap();
+    assert!(
+        stored
+            .effective(Some("personal"))
+            .decision
+            .as_ref()
+            .is_some_and(|section| section
+                .instances
+                .values()
+                .any(|entry| entry.provider == "opencode"))
+    );
+    assert!(matches!(
+        h.app.provider_followup,
+        Some(crate::screens::ProviderFollowUp::WebSearch {
+            provider: crate::screens::CompanionProvider::OpenCode,
+            ..
+        })
+    ));
+    h.app.on_key(key(KeyCode::Char('y')));
+    assert!(h.app.provider_followup.is_none());
+    let stored = h.store.load().unwrap();
+    assert!(
+        stored
+            .effective(Some("personal"))
+            .websearch
+            .values()
+            .any(|entry| entry.provider == "opencode")
+    );
+}
+
+#[test]
+fn adding_openrouter_in_the_settings_asks_only_the_decision_question() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/login");
+    descend_to_credential(&mut h, LoginProvider::OpenRouter);
+    for c in "or-key".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    assert!(matches!(
+        h.app.provider_followup,
+        Some(crate::screens::ProviderFollowUp::Decision {
+            provider: crate::screens::CompanionProvider::OpenRouter,
+            ..
+        })
+    ));
+    h.app.on_key(key(KeyCode::Char('y')));
+    assert!(h.app.provider_followup.is_none());
+    let stored = h.store.load().unwrap();
+    assert!(
+        stored.effective(Some("personal")).websearch.is_empty(),
+        "no OpenRouter search companion"
+    );
+}
+
+#[test]
 fn an_add_before_a_late_bootstrap_keeps_both_catalogs() {
     // The startup fetch races an add: it was spawned first, but a slow
     // catalog can land it afterwards. Its slices replace themselves;
@@ -1742,6 +1815,9 @@ fn removing_a_websearch_provider_deletes_its_store_entry() {
     personal.websearch_order.push("brave-main".to_owned());
 
     h.app.open_settings_at(SettingsSection::WebSearch);
+    if let Screen::Settings(settings) = &mut h.app.screen {
+        settings.row = 1;
+    }
     assert!(h.app.remove_websearch_provider().is_empty());
     assert!(h.app.effective().websearch.is_empty());
     assert_eq!(
@@ -4612,6 +4688,92 @@ fn slash_thinking_persists_the_level_and_rebuilds_the_agent() {
 }
 
 #[test]
+fn slash_search_persists_the_switch_and_opens_the_page() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let profile = h.app.session_profile.clone().unwrap_or_default();
+    crate::commands::dispatch(&mut h.app, "/search off");
+    assert!(
+        !h.store
+            .load()
+            .unwrap()
+            .effective(Some(&profile))
+            .is_websearch_enabled()
+    );
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .contains(&Line::Notice("web search off".into()))
+    );
+    // The second off is a no-op with its own line.
+    crate::commands::dispatch(&mut h.app, "/search off");
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .contains(&Line::Notice("web search is already off".into()))
+    );
+    crate::commands::dispatch(&mut h.app, "/search on");
+    assert!(
+        h.store
+            .load()
+            .unwrap()
+            .effective(Some(&profile))
+            .is_websearch_enabled()
+    );
+    // On with no provider says why search still does nothing.
+    assert!(h.app.transcript.lines().iter().any(|line| {
+        matches!(line, Line::Notice(text) if text.starts_with("web search on, but this profile has no provider"))
+    }));
+    crate::commands::dispatch(&mut h.app, "/search maybe");
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .iter()
+            .any(|line| { matches!(line, Line::Notice(text) if text.contains("unknown state")) })
+    );
+    crate::commands::dispatch(&mut h.app, "/search");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::WebSearch);
+}
+
+#[test]
+fn slash_decide_persists_the_switch_and_opens_the_page() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let profile = h.app.session_profile.clone().unwrap_or_default();
+    crate::commands::dispatch(&mut h.app, "/decide off");
+    assert!(
+        !h.store
+            .load()
+            .unwrap()
+            .effective(Some(&profile))
+            .is_decision_enabled()
+    );
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .contains(&Line::Notice("decision models off".into()))
+    );
+    crate::commands::dispatch(&mut h.app, "/decide on");
+    assert!(
+        h.store
+            .load()
+            .unwrap()
+            .effective(Some(&profile))
+            .is_decision_enabled()
+    );
+    crate::commands::dispatch(&mut h.app, "/decide");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Decision);
+}
+
+#[test]
 fn a_turn_records_its_profile_for_the_workspace() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let workspace = h.app.options.workspace.clone();
@@ -4693,6 +4855,185 @@ fn a_logged_in_profile_opens_the_chat_without_the_login_screen() {
     assert_eq!(app.session_profile.as_deref(), Some("work"));
     // The session reads work's section, so the footer shows its model.
     assert_eq!(app.effective().model.as_deref(), Some("work-model"));
+}
+
+#[test]
+fn an_openrouter_login_offers_only_the_decision_question() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .install_login(
+            "personal",
+            "OpenRouter",
+            &Backend::OpenRouter {
+                api_key: "or-key".into(),
+            },
+            &[],
+            true,
+        )
+        .unwrap();
+    let followup = h
+        .app
+        .companion_followup(
+            crate::screens::CompanionProvider::OpenRouter,
+            "personal",
+            "OpenRouter",
+        )
+        .unwrap();
+    assert!(matches!(
+        followup,
+        crate::screens::ProviderFollowUp::Decision {
+            provider: crate::screens::CompanionProvider::OpenRouter,
+            ..
+        }
+    ));
+    assert_eq!(
+        followup.question(),
+        "Do you also want to add decision models from OpenRouter?"
+    );
+    h.app.provider_followup = Some(followup);
+    h.app.answer_provider_followup(true);
+    let saved = h.store.load().unwrap();
+    let profile = saved.effective(Some("personal"));
+    let decision = profile.decision.as_ref().unwrap();
+    assert_eq!(decision.instances["OpenRouter"].provider, "openrouter");
+    assert_eq!(decision.instances["OpenRouter"].base_url, None);
+    assert!(
+        profile.instances["OpenRouter"].secret_ref.is_some(),
+        "the provider's key stays in the store"
+    );
+    // OpenRouter has no standalone search route, so no second question.
+    assert!(h.app.provider_followup.is_none());
+    assert!(profile.websearch.is_empty());
+    assert!(
+        h.app
+            .companion_followup(
+                crate::screens::CompanionProvider::OpenRouter,
+                "personal",
+                "OpenRouter",
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn an_opencode_login_offers_decision_models_then_search() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .install_login(
+            "personal",
+            "OpenCode",
+            &Backend::opencode("oc-key", None),
+            &[],
+            true,
+        )
+        .unwrap();
+    let followup = h
+        .app
+        .companion_followup(
+            crate::screens::CompanionProvider::OpenCode,
+            "personal",
+            "OpenCode",
+        )
+        .unwrap();
+    assert_eq!(
+        followup.question(),
+        "Do you also want to add decision models from OpenCode?"
+    );
+    h.app.provider_followup = Some(followup);
+    h.app.answer_provider_followup(true);
+    let saved = h.store.load().unwrap();
+    let profile = saved.effective(Some("personal"));
+    let decision = profile.decision.as_ref().unwrap();
+    assert_eq!(decision.instances["OpenCode"].provider, "opencode");
+    assert_eq!(
+        decision.instances["OpenCode"].base_url, None,
+        "Console's default root"
+    );
+    let followup = h.app.provider_followup.clone().unwrap();
+    assert_eq!(
+        followup.question(),
+        "Do you also want to add web search from OpenCode?"
+    );
+    h.app.answer_provider_followup(true);
+    let saved = h.store.load().unwrap();
+    let profile = saved.effective(Some("personal"));
+    assert_eq!(profile.websearch["OpenCode"].provider, "opencode");
+    assert_eq!(profile.websearch_order, vec!["OpenCode".to_owned()]);
+    assert!(h.app.provider_followup.is_none());
+    assert!(
+        h.app
+            .companion_followup(
+                crate::screens::CompanionProvider::OpenCode,
+                "personal",
+                "OpenCode",
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn an_opencode_go_login_points_the_decision_companion_at_the_go_root() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .install_login(
+            "personal",
+            "OpenCode Go",
+            &Backend::opencode(
+                "go-key",
+                Some(rhema_provider_opencode::GO_BASE_URL.to_owned()),
+            ),
+            &[],
+            true,
+        )
+        .unwrap();
+    h.app.provider_followup = h.app.companion_followup(
+        crate::screens::CompanionProvider::OpenCode,
+        "personal",
+        "OpenCode Go",
+    );
+    h.app.answer_provider_followup(true);
+    let saved = h.store.load().unwrap();
+    let profile = saved.effective(Some("personal"));
+    assert_eq!(
+        profile.decision.as_ref().unwrap().instances["OpenCode Go"]
+            .base_url
+            .as_deref(),
+        Some("https://opencode.ai/inference/go")
+    );
+    assert!(matches!(
+        h.app.provider_followup,
+        Some(crate::screens::ProviderFollowUp::WebSearch { .. })
+    ));
+}
+
+#[test]
+fn an_opencode_companion_followup_can_be_skipped_question_by_question() {
+    let mut h = harness_with_secrets(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .install_login(
+            "personal",
+            "OpenCode",
+            &Backend::opencode("oc-key", None),
+            &[],
+            true,
+        )
+        .unwrap();
+    h.app.provider_followup = h.app.companion_followup(
+        crate::screens::CompanionProvider::OpenCode,
+        "personal",
+        "OpenCode",
+    );
+    h.app.answer_provider_followup(false);
+    assert!(matches!(
+        h.app.provider_followup,
+        Some(crate::screens::ProviderFollowUp::WebSearch { .. })
+    ));
+    h.app.answer_provider_followup(false);
+    assert!(h.app.provider_followup.is_none());
+    let saved = h.store.load().unwrap();
+    let profile = saved.effective(Some("personal"));
+    assert!(profile.decision.is_none());
+    assert!(profile.websearch.is_empty());
 }
 
 #[test]
@@ -7920,8 +8261,9 @@ fn adding_a_websearch_provider_places_its_key_and_enrolls_it() {
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
     h.app
         .open_settings_at(crate::screens::SettingsSection::WebSearch);
-    // The add row is selected on the empty page; enter opens the
-    // dialog.
+    // The switch leads; Down selects the add row on the empty page,
+    // and enter opens the dialog.
+    h.app.on_key(key(KeyCode::Down));
     let action = h.app.on_key(key(KeyCode::Enter));
     assert_eq!(
         action,
@@ -7976,7 +8318,9 @@ fn a_second_provider_of_the_same_kind_joins_the_chain() {
     let mut h = harness_with_secrets(None, None, Session::default());
     h.app
         .open_settings_at(crate::screens::SettingsSection::WebSearch);
-    // First pass: Exa, keep the suggested name, type a key.
+    // First pass: Down past the switch, Exa, keep the suggested
+    // name, type a key.
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     {
         let crate::Screen::Settings(settings) = &mut h.app.screen else {
@@ -8052,7 +8396,9 @@ fn the_websearch_order_moves_and_persists_without_a_rebuild() {
     let _ = h.store.save(&h.app.config.clone());
     h.app
         .open_settings_at(crate::screens::SettingsSection::WebSearch);
-    // Row 0 is brave-main; j sends it down one.
+    // Row 0 is the switch; Down reaches brave-main, j sends it down
+    // one.
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Char('j')));
     let stored = h.store.load().unwrap().effective(Some("personal"));
     assert_eq!(
@@ -8105,6 +8451,7 @@ fn removing_a_websearch_provider_takes_its_order_entry_with_it() {
     let _ = h.store.save(&h.app.config.clone());
     h.app
         .open_settings_at(crate::screens::SettingsSection::WebSearch);
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Char('d')));
     assert_eq!(
         h.app.on_key(key(KeyCode::Char('y'))),
@@ -8128,8 +8475,10 @@ fn a_paste_reaches_the_websearch_dialogs_input() {
     let mut h = harness_with_secrets(None, None, Session::default());
     h.app
         .open_settings_at(crate::screens::SettingsSection::WebSearch);
-    // Enter opens the dialog on the kind list, enter descends to the
-    // name line, enter again reaches the key line.
+    // Down past the switch, enter opens the dialog on the kind list,
+    // enter descends to the name line, enter again reaches the key
+    // line.
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     {
         let crate::Screen::Settings(settings) = &mut h.app.screen else {
@@ -8792,8 +9141,9 @@ fn adding_a_decision_model_places_its_key_and_persists() {
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
     h.app
         .open_settings_at(crate::screens::SettingsSection::Decision);
-    // The add row is selected on the empty page; enter opens the
-    // dialog, the first kind is Jev.
+    // The switch leads; Down selects the add row on the empty page,
+    // and enter opens the dialog, the first kind is Jev.
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     {
         let crate::Screen::Settings(settings) = &mut h.app.screen else {
@@ -8844,6 +9194,7 @@ fn a_clef_decision_model_carries_its_account_and_a_local_one_its_endpoint() {
     let mut h = harness_with_secrets(None, None, Session::default());
     h.app
         .open_settings_at(crate::screens::SettingsSection::Decision);
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     {
         let crate::Screen::Settings(settings) = &mut h.app.screen else {
@@ -8919,7 +9270,9 @@ fn enter_on_a_decision_row_sets_the_default_without_a_rebuild() {
     let _ = h.store.save(&h.app.config.clone());
     h.app
         .open_settings_at(crate::screens::SettingsSection::Decision);
-    // Row 0 is Clef (the first by name, the default); Jev sits below.
+    // The switch leads, then Clef (the first by name, the default);
+    // Jev sits below.
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Down));
     assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
     let stored = h.store.load().unwrap().effective(Some("personal"));
@@ -8968,7 +9321,9 @@ fn removing_the_default_decision_model_clears_it_and_its_store_entry() {
     let _ = h.store.save(&h.app.config.clone());
     h.app
         .open_settings_at(crate::screens::SettingsSection::Decision);
-    // Row 0 is Jev, the default: d arms the confirm, y removes it.
+    // The switch leads, then Jev, the default: Down selects it, d
+    // arms the confirm, y removes it.
+    h.app.on_key(key(KeyCode::Down));
     assert_eq!(h.app.on_key(key(KeyCode::Char('d'))), vec![]);
     assert_eq!(h.app.on_key(key(KeyCode::Char('y'))), vec![]);
     let stored = h.store.load().unwrap().effective(Some("personal"));

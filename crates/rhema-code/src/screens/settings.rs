@@ -172,6 +172,8 @@ pub enum SettingsAction {
     /// `y` on the remove-server confirm: the entry goes from the
     /// profile.
     RemoveMcpServer,
+    /// Enter on the web search page's switch row: the feature flips.
+    ToggleWebSearch,
     /// Enter on the web search page's add row: the add-provider
     /// dialog opens.
     OpenWebSearchDialog,
@@ -189,6 +191,9 @@ pub enum SettingsAction {
     /// `]` on a provider row: one step down the chain, never out of
     /// it.
     MoveWebSearchDown,
+    /// Enter on the Decision models page's switch row: the feature
+    /// flips.
+    ToggleDecision,
     /// Enter on the Decision models page's add row: the
     /// add-instance dialog opens.
     OpenDecisionDialog,
@@ -443,6 +448,9 @@ pub struct SettingsScreen {
     /// key arms it, `y` confirms, `n` and esc leave the row alone.
     pub mcp_confirm: Option<String>,
     // The Web search page's snapshot.
+    /// Whether the profile wires the `search` macro, the switch row
+    /// above the providers.
+    pub websearch_enabled: bool,
     /// The active profile's providers, in chain order first, synced
     /// from the config whenever the app mutates it.
     pub websearch: Vec<WebSearchRow>,
@@ -452,6 +460,9 @@ pub struct SettingsScreen {
     /// key arms it, `y` confirms, `n` and esc leave the row alone.
     pub websearch_confirm: Option<String>,
     // The Decision models page's snapshot.
+    /// Whether the profile wires the `decide` macro, the switch row
+    /// above the instances.
+    pub decision_enabled: bool,
     /// The active profile's decision instances in name order, synced
     /// from the config whenever the app mutates it.
     pub decision: Vec<DecisionRow>,
@@ -545,9 +556,11 @@ impl SettingsScreen {
             mcp: Vec::new(),
             mcp_dialog: None,
             mcp_confirm: None,
+            websearch_enabled: true,
             websearch: Vec::new(),
             websearch_dialog: None,
             websearch_confirm: None,
+            decision_enabled: true,
             decision: Vec::new(),
             decision_dialog: None,
             decision_confirm: None,
@@ -851,8 +864,10 @@ impl SettingsScreen {
         {
             return None;
         }
+        // Row zero is the on/off switch, not a provider.
+        let index = self.row.checked_sub(1)?;
         self.websearch
-            .get(self.row)
+            .get(index)
             .and_then(|row| (!row.add).then_some(row.name.as_str()))
     }
 
@@ -866,8 +881,10 @@ impl SettingsScreen {
         {
             return None;
         }
+        // Row zero is the on/off switch, not an instance.
+        let index = self.row.checked_sub(1)?;
         self.decision
-            .get(self.row)
+            .get(index)
             .and_then(|row| (!row.add).then_some(row.name.as_str()))
     }
 
@@ -882,10 +899,11 @@ impl SettingsScreen {
             SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
             SettingsSection::Mcp => self.mcp.len() + 1,
-            // The web search and decision rows already carry their add
-            // row; the MCP rows do not, hence its `+ 1`.
-            SettingsSection::WebSearch => self.websearch.len(),
-            SettingsSection::Decision => self.decision.len(),
+            // The switch row leads; the web search and decision rows
+            // already carry their add row; the MCP rows do not, hence
+            // its `+ 1`.
+            SettingsSection::WebSearch => self.websearch.len() + 1,
+            SettingsSection::Decision => self.decision.len() + 1,
             SettingsSection::Update => 1,
             _ => 0,
         }
@@ -943,10 +961,12 @@ impl SettingsScreen {
                 Some(_) => SettingsAction::ToggleMcpServer,
                 None => SettingsAction::OpenMcpDialog,
             },
+            SettingsSection::WebSearch if self.row == 0 => SettingsAction::ToggleWebSearch,
             SettingsSection::WebSearch => match self.selected_websearch() {
                 Some(_) => SettingsAction::None,
                 None => SettingsAction::OpenWebSearchDialog,
             },
+            SettingsSection::Decision if self.row == 0 => SettingsAction::ToggleDecision,
             SettingsSection::Decision => match self.selected_decision() {
                 Some(_) => SettingsAction::SetDefaultDecision,
                 None => SettingsAction::OpenDecisionDialog,

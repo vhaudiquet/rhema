@@ -193,6 +193,11 @@ pub enum ResolveError {
          or OPENCODE_API_KEY environment variable)"
     )]
     Unconfigured,
+    /// The profile's decision switch is off. Distinct from
+    /// [`ResolveError::Unconfigured`] so the call says why the macro
+    /// is absent.
+    #[error("decision models are disabled in this profile")]
+    Disabled,
     /// The profile's default instance, not buildable: a kind
     /// nothing answers to, a key resolving through no tier, an
     /// account Clef lacks, a model the kind does not have.
@@ -244,6 +249,9 @@ fn selection_with(
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,
 ) -> Option<(DecisionInstance, Option<String>)> {
+    if profile.is_some_and(|profile| !profile.is_decision_enabled()) {
+        return None;
+    }
     if let Some((_, instance)) = profile.and_then(Profile::active_decision_instance) {
         let key = instance.api_key(secrets);
         return Some((instance.clone(), key));
@@ -258,6 +266,9 @@ pub fn resolve_with(
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,
 ) -> Result<Arc<dyn DecisionProvider>, ResolveError> {
+    if profile.is_some_and(|profile| !profile.is_decision_enabled()) {
+        return Err(ResolveError::Disabled);
+    }
     let Some((name, instance)) = profile.and_then(Profile::active_decision_instance) else {
         let (instance, key) = environment_tier(env).ok_or(ResolveError::Unconfigured)?;
         return build(&instance, key).map_err(|source| ResolveError::Build {
@@ -301,10 +312,11 @@ pub fn is_configured_with(
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,
 ) -> bool {
-    profile
-        .and_then(Profile::active_decision_instance)
-        .is_some()
-        || resolve_with(env, profile, secrets).is_ok()
+    !profile.is_some_and(|profile| !profile.is_decision_enabled())
+        && (profile
+            .and_then(Profile::active_decision_instance)
+            .is_some()
+            || resolve_with(env, profile, secrets).is_ok())
 }
 
 /// The environment tier: one candidate per kind in [`KINDS`], the
@@ -356,6 +368,24 @@ mod tests {
             account_id: Some("acc".into()),
             base_url: None,
         }
+    }
+
+    #[test]
+    fn the_profiles_switch_closes_the_instance_and_env_tiers() {
+        let mut profile = Profile::default();
+        let mut section = DecisionSettings::default();
+        section
+            .instances
+            .insert("Jev".into(), instance("jev", Some("k")));
+        profile.decision = Some(section);
+        profile.decision_enabled = Some(false);
+        let env = |name: &str| (name == "TYPESAFE_API_KEY").then(|| "env".to_owned());
+        assert!(selection_with(env, Some(&profile), None).is_none());
+        assert!(!is_configured_with(env, Some(&profile), None));
+        assert!(matches!(
+            resolve_with(env, Some(&profile), None),
+            Err(ResolveError::Disabled)
+        ));
     }
 
     #[tokio::test]
