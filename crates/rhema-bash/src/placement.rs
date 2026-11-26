@@ -33,12 +33,25 @@ impl Drop for Placed {
 #[derive(Default)]
 pub struct Registry {
     placed: Mutex<BTreeMap<u64, Arc<Placed>>>,
+    /// Owners kept alive with the registry: the host endpoint behind
+    /// the `search` and `decide` wirings, whose socket must outlive
+    /// the setup call that produced it.
+    keepalive: Mutex<Vec<Arc<dyn std::any::Any + Send + Sync>>>,
 }
 
 impl Registry {
     /// An empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keeps `item` alive until this registry drops. The caller uses
+    /// this for a wiring whose provisioned state is a live socket.
+    pub fn keep(&self, item: Arc<dyn std::any::Any + Send + Sync>) {
+        self.keepalive
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(item);
     }
 
     /// Places `kits`' one init file, or returns the file already placed

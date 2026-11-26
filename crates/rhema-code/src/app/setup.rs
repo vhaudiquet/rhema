@@ -1170,17 +1170,16 @@ pub(crate) fn session_agent_config(
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
         None,
-    )
-    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    );
+    if let Some(wiring) = &search {
+        kits_registry.keep(wiring.clone());
+    }
+    let search = search.map(|wiring| (wiring.shell_env.clone(), wiring.section));
     if let Some((env, section)) = search {
-        kits.push(kit_for(
+        kits.push(kit_for_shell(
             Feature::Search,
             env,
-            vec![builtin_stub(
-                rhema_bash::websearch::NAME,
-                rhema_bash::websearch::VAR_BIN,
-                vec![rhema_bash::websearch::MODE],
-            )],
+            search_shell(),
             Needs::HOST_CALL,
         ));
         sections.insert(Feature::Search, section);
@@ -1192,17 +1191,16 @@ pub(crate) fn session_agent_config(
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
         None,
-    )
-    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    );
+    if let Some(wiring) = &decision {
+        kits_registry.keep(wiring.clone());
+    }
+    let decision = decision.map(|wiring| (wiring.shell_env.clone(), wiring.section));
     if let Some((env, section)) = decision {
-        kits.push(kit_for(
+        kits.push(kit_for_shell(
             Feature::Decision,
             env,
-            vec![builtin_stub(
-                rhema_bash::decision::NAME,
-                rhema_bash::decision::VAR_BIN,
-                vec![rhema_bash::decision::MODE],
-            )],
+            decision_shell(),
             Needs::HOST_CALL,
         ));
         sections.insert(Feature::Decision, section);
@@ -1338,11 +1336,23 @@ pub(crate) fn kit_for_shell(
 
 /// The `see` macro, the one kit whose body is shell text.
 pub(crate) fn vision_shell() -> Shell {
+    Shell::new(rhema_bash::vision::NAME, rhema_bash::vision::SHELL_BODY)
+        .expect("the vision macro is valid shell")
+}
+
+/// The `search` macro's host-endpoint body.
+pub(crate) fn search_shell() -> Shell {
     Shell::new(
-        rhema_bash::vision::NAME,
-        rhema_bash::vision::SHELL_BODY,
+        rhema_bash::websearch::NAME,
+        rhema_bash::websearch::SHELL_BODY,
     )
-    .expect("the vision macro is valid shell")
+    .expect("the search macro is valid shell")
+}
+
+/// The `decide` macro's host-endpoint body.
+pub(crate) fn decision_shell() -> Shell {
+    Shell::new(rhema_bash::decision::NAME, rhema_bash::decision::SHELL_BODY)
+        .expect("the decide macro is valid shell")
 }
 
 /// The prompt's two optional sections, through the one gate the

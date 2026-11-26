@@ -1,33 +1,26 @@
 //! The `__decision` mode and the session wiring: the `decide` macro's
 //! other end.
 //!
-//! The agent's shell execs `rhema __decision …`; this module owns the
-//! pass-through: it parses the verb (or reads the JSON request from
-//! stdin or a file), resolves the profile's decision provider the
-//! wiring named through the registry, runs the request, and prints
-//! the lines (or, under `--json`, the response, pretty). The settings are
-//! read fresh per call, so a provider configured mid-session serves
-//! the next `decide` without a restart; the profile is the
-//! wiring's env var, pinned at session start, the one per-session
-//! input a standalone exec can carry without session state.
+//! The agent's shell calls the session's `decide` function. A local
+//! shell execs `rhema __decision …`; a sandboxed one posts the argv
+//! and any stdin to the host endpoint in [`crate::cap`]. Both paths
+//! share the same parser, the same provider resolution, and the same
+//! renderer.
 //!
 //! A profile naming no decision provider wires nothing, no function
-//! and no prompt section (`specs/rhema-decision.md` §10). A sandboxed
-//! session wires only when the sandbox has the installed helper and
-//! the profile opts into credential injection; the host supplies the
-//! resolved instance. One wiring per session key, held for the
-//! process, because the init file's env map is per-profile and a
-//! profile switch re-runs the assembly: the search wire's shape.
+//! and no prompt section (`specs/rhema-decision.md` §10). The host
+//! resolves the profile's instance once, at session setup, and keeps
+//! it in this process. The sandbox sees the session socket and its
+//! token, never the key.
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read as _;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
+use rhema_config::{DecisionInstance, Profile};
 use rhema_decision::{DecisionError, DecisionProvider, DecisionRequest, Question};
 
 /// The resolved instance the host hands a sandboxed helper: the
@@ -55,59 +48,25 @@ const USAGE: &str = "decide: ask a decision model (Jev, Clef, or one OpenRouter 
 /// misdirected pipe is a hang with output.
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 
-/// One session's wiring, the sandbox wiring shape: the provisioned init
-/// file held for the process's life, one per session key.
-static WIRED: OnceLock<Mutex<BTreeMap<String, Arc<rhema_bash::decision::Wiring>>>> =
-    OnceLock::new();
-
-fn registry() -> &'static Mutex<BTreeMap<String, Arc<rhema_bash::decision::Wiring>>> {
-    WIRED.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-/// Wires the session's decide macro, the setup's call: the gate first
-/// (a sandboxed session and a providerless profile both wire
-/// nothing), then one provision per session key. `None` when the gate
-/// closes: the caller renders no section, the agent sees no function.
+/// Wires the session's decide macro: the profile's instance is
+/// resolved here, in the host process, and the shell only gets the
+/// session endpoint's socket and token. `None` when the profile names
+/// no provider or the backend has no route to the host endpoint.
 pub(crate) fn wire_for_session(
     session_key: &str,
     profile: &Profile,
     secrets: Option<&dyn SecretStore>,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
-    bash_env: Option<OsString>,
+    _bash_env: Option<OsString>,
 ) -> Option<Arc<rhema_bash::decision::Wiring>> {
-    // The gate answers the only question the settings can: does this
-    // profile name a provider, or does the environment tier serve
-    // one? The provider itself is not cached; the mode handler
-    // resolves fresh per invocation, so a provider configured
-    // mid-session lands without a restart.
-    let (mut instance, key) = rhema_decision_registry::selection(Some(profile), secrets)?;
-    // The injected route needs the opt-in and an installed helper.
-    // A mounted sandbox has one under the shared root; a sandbox with
-    // no root has one in its own cache.
-    let inject =
-        sandboxed.is_none_or(|s| s.helper_available()) && profile.sandbox_inject_credentials();
-    if sandboxed.is_some() && !inject {
-        return None;
-    }
-    let mut reg = registry().lock().expect("decision wire registry lock");
-    if let Some(wiring) = reg.get(session_key) {
-        return Some(wiring.clone());
-    }
-    let bin = std::env::current_exe().ok()?;
-    let mut wiring = rhema_bash::decision::provision_with_bin(bash_env, &bin, session_key).ok()?;
-    if inject {
-        // The profile resolved here; the sandbox gets the one instance
-        // and its key, not a config file it cannot read.
-        instance.api_key = key;
-        instance.secret_ref = None;
-        wiring.shell_env.insert(
-            VAR_INSTANCE.to_owned(),
-            serde_json::to_string(&instance).ok()?,
-        );
-    }
-    let wiring = Arc::new(wiring);
-    reg.insert(session_key.to_owned(), wiring.clone());
-    Some(wiring)
+    let (instance, key) = rhema_decision_registry::selection(Some(profile), secrets)?;
+    let endpoint = crate::cap::wire(
+        session_key,
+        sandboxed,
+        crate::cap::Block::Decision(crate::cap::DecisionSetup { instance, key }),
+    )?;
+    let wiring = rhema_bash::decision::provision_host_call(endpoint.env(), endpoint).ok()?;
+    Some(Arc::new(wiring))
 }
 
 /// One parsed invocation: the request, and whether to print the raw
@@ -220,6 +179,14 @@ pub(crate) fn request_from_json(text: &str) -> Result<DecisionRequest, String> {
     DecisionRequest::from_json(text).map_err(|err| format!("not a request: {err}"))
 }
 
+/// One invocation's whole answer before it reaches a stream. The
+/// modes print it; the host endpoint serializes it.
+pub(crate) struct Outcome {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Runs one invocation against a caller-supplied provider and prints
 /// the answer: the lines (or the JSON) on stdout, the failure's own
 /// text on stderr, the exit codes the usage table names. The seam the
@@ -231,6 +198,18 @@ pub(crate) fn request_from_json(text: &str) -> Result<DecisionRequest, String> {
 /// right here would panic with the nested-runtime error. The search
 /// mode's arrangement.
 pub(crate) fn run(invocation: &Invocation, provider: Arc<dyn DecisionProvider>) -> i32 {
+    let outcome = run_outcome(invocation, provider);
+    if !outcome.stdout.is_empty() {
+        print!("{}", outcome.stdout);
+    }
+    if !outcome.stderr.is_empty() {
+        eprint!("{}", outcome.stderr);
+    }
+    outcome.code
+}
+
+/// [`run`] without the printing: the host endpoint's seam.
+pub(crate) fn run_outcome(invocation: &Invocation, provider: Arc<dyn DecisionProvider>) -> Outcome {
     let invocation = invocation.clone();
     let provider_thread = provider.clone();
     let outcome = std::thread::scope(|scope| {
@@ -250,22 +229,84 @@ pub(crate) fn run(invocation: &Invocation, provider: Arc<dyn DecisionProvider>) 
     });
     match outcome {
         Ok(response) => {
-            if invocation.json {
-                println!("{}", rhema_decision::render_json(&response));
+            let text = if invocation.json {
+                rhema_decision::render_json(&response)
             } else {
-                println!("{}", rhema_decision::render(&response, provider.kind()));
+                rhema_decision::render(&response, provider.kind())
+            };
+            Outcome {
+                code: 0,
+                stdout: format!("{text}\n"),
+                stderr: String::new(),
             }
-            0
         }
-        Err(DecisionError::Invalid(problem)) => {
-            eprintln!("decide: invalid request: {problem}");
-            rhema_bash::decision::EXIT_INVALID
-        }
-        Err(err) => {
-            eprintln!("decide: {}: {err}", provider.kind());
-            1
-        }
+        Err(DecisionError::Invalid(problem)) => Outcome {
+            code: rhema_bash::decision::EXIT_INVALID,
+            stdout: String::new(),
+            stderr: format!("decide: invalid request: {problem}\n"),
+        },
+        Err(err) => Outcome {
+            code: 1,
+            stdout: String::new(),
+            stderr: format!("decide: {}: {err}\n", provider.kind()),
+        },
     }
+}
+
+/// Parses and runs one host endpoint request: the argv the shell
+/// sent, plus its stdin, against the instance the host resolved at
+/// wiring time.
+pub(crate) fn execute_argv(
+    argv: &[String],
+    stdin: &str,
+    instance: &DecisionInstance,
+    key: Option<&str>,
+) -> Outcome {
+    let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    let shape = match parse(&args) {
+        Ok(shape) => shape,
+        Err(()) => {
+            return Outcome {
+                code: rhema_bash::decision::EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!("{USAGE}\n"),
+            };
+        }
+    };
+    let invocation = match shape {
+        Shape::Shorthand(invocation) => invocation,
+        Shape::Stdin { json } => match request_from_json(stdin) {
+            Ok(request) => Invocation { json, request },
+            Err(problem) => {
+                return Outcome {
+                    code: rhema_bash::decision::EXIT_USAGE,
+                    stdout: String::new(),
+                    stderr: format!("decide: {problem}\n"),
+                };
+            }
+        },
+        // The shell resolves `-f` by reading the file into stdin; a
+        // file path cannot cross to the host's filesystem.
+        Shape::File { .. } => {
+            return Outcome {
+                code: rhema_bash::decision::EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!("{USAGE}\n"),
+            };
+        }
+    };
+    let provider =
+        match rhema_decision_registry::build(instance, key.unwrap_or_default().to_owned()) {
+            Ok(provider) => provider,
+            Err(err) => {
+                return Outcome {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: format!("decide: {err}\n"),
+                };
+            }
+        };
+    run_outcome(&invocation, provider)
 }
 
 /// The mode's entry: the process exit code is ours, its stderr is the
@@ -378,6 +419,7 @@ mod tests {
     use rhema_decision::mock::MockDecisionProvider;
     use rhema_decision::{Answer, DecisionError};
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -633,6 +675,7 @@ mod sandbox_tests {
     use crate::sandbox::Sandboxed;
     use rhema_bash::ShellTools;
     use rhema_config::{DecisionInstance, DecisionSettings, SandboxSettings};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn sandboxed() -> (Sandboxed, tempfile::TempDir) {
@@ -703,55 +746,47 @@ mod sandbox_tests {
     }
 
     #[test]
-    fn an_ssh_sandbox_with_the_installed_helper_wires_the_instance() {
+    fn a_remote_sandbox_with_no_forward_path_does_not_wire() {
         let sandboxed = remote_sandbox();
-        let wiring = wire_for_session(
-            "sandbox-decision-ssh-inject",
-            &profile(true),
-            None,
-            Some(&sandboxed),
-            None,
-        )
-        .expect("an opted-in ssh session wires");
-        let raw = wiring
-            .shell_env
-            .get(VAR_INSTANCE)
-            .expect("the instance env");
-        assert!(raw.contains("literal-key"), "{raw}");
-    }
-
-    #[test]
-    fn the_active_instance_crosses_in_env_when_opted_in() {
-        let (sandboxed, _dir) = sandboxed();
-        let wiring = wire_for_session(
-            "sandbox-decision-inject",
-            &profile(true),
-            None,
-            Some(&sandboxed),
-            None,
-        )
-        .expect("the opted-in session wires");
-        let raw = wiring
-            .shell_env
-            .get(VAR_INSTANCE)
-            .expect("the instance env");
-        assert!(raw.contains("literal-key"), "{raw}");
-        assert!(raw.contains("http://box"), "{raw}");
-        assert!(raw.contains("\"model\":\"m\""), "{raw}");
-    }
-
-    #[test]
-    fn without_the_opt_in_a_sandboxed_session_does_not_wire() {
-        let (sandboxed, _dir) = sandboxed();
         assert!(
             wire_for_session(
-                "sandbox-decision-no-inject",
-                &profile(false),
+                "sandbox-decision-ssh-no-forward",
+                &profile(true),
                 None,
                 Some(&sandboxed),
                 None,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_mounted_sandbox_wires_the_endpoint_and_never_the_key() {
+        let (sandboxed, _dir) = sandboxed();
+        let wiring = wire_for_session(
+            "sandbox-decision-endpoint",
+            &profile(true),
+            None,
+            Some(&sandboxed),
+            None,
+        )
+        .expect("the mounted session wires");
+        let socket = wiring
+            .shell_env
+            .get(rhema_bash::runtime::VAR_CAP_SOCKET)
+            .expect("the cap socket");
+        assert!(socket.ends_with("cap.sock"), "{socket}");
+        assert!(
+            wiring
+                .shell_env
+                .get(rhema_bash::runtime::VAR_CAP_TOKEN)
+                .is_some_and(|token| token.len() == 64)
+        );
+        assert!(
+            wiring
+                .shell_env
+                .values()
+                .all(|value| !value.contains("literal-key"))
         );
     }
 }

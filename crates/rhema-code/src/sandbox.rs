@@ -481,29 +481,19 @@ fn sandbox_stub_kits() -> Vec<Kit> {
             Needs::MACRO,
         ),
         Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE).with_shell(
+            Shell::new(rhema_bash::vision::NAME, rhema_bash::vision::SHELL_BODY)
+                .expect("the built-in vision macro is valid shell"),
+        ),
+        Kit::new(Feature::Search, Vec::new(), Needs::HOST_CALL).with_shell(
             Shell::new(
-                rhema_bash::vision::NAME,
-                rhema_bash::vision::SHELL_BODY,
+                rhema_bash::websearch::NAME,
+                rhema_bash::websearch::SHELL_BODY,
             )
-            .expect("the built-in vision macro is valid shell"),
+            .expect("the built-in search macro is valid shell"),
         ),
-        Kit::new(
-            Feature::Search,
-            vec![stub(
-                "search",
-                "RHEMA_SEARCH_BIN",
-                rhema_bash::websearch::MODE,
-            )],
-            Needs::HOST_CALL,
-        ),
-        Kit::new(
-            Feature::Decision,
-            vec![stub(
-                "decide",
-                "RHEMA_DECISION_BIN",
-                rhema_bash::decision::MODE,
-            )],
-            Needs::HOST_CALL,
+        Kit::new(Feature::Decision, Vec::new(), Needs::HOST_CALL).with_shell(
+            Shell::new(rhema_bash::decision::NAME, rhema_bash::decision::SHELL_BODY)
+                .expect("the built-in decide macro is valid shell"),
         ),
     ]
 }
@@ -879,12 +869,6 @@ impl Sandboxed {
             remote.helper_dir.clone(),
             remote.jobs_session(tag),
         )
-    }
-
-    /// Whether the installed helper can serve search and decide, the
-    /// two kits whose state lives entirely in the env.
-    pub(crate) fn helper_available(&self) -> bool {
-        self.shared.is_some() || self.remote.is_some()
     }
 
     /// Records the remote session tree so dropping the assembly removes

@@ -1,8 +1,9 @@
 # rhema-runtime-kit, what a generated bash function needs and how it crosses a sandbox
 
 > **Status:** v1 implemented for jobs, vision, search, and decide.
-> `see` is a shell macro with no helper binary; the other four still
-> run the installed helper.
+> `see`, `search`, and `decide` are shell macros with no helper
+> binary. `search` and `decide` talk to a per-session host endpoint;
+> `job` still runs the installed helper because `gob` is a binary.
 > MCP is no longer a kit: `mcp-cli` runs inside the sandbox and reads
 > its own config there. The bridge and socket sections below describe
 > the earlier host-side design and are kept as history.
@@ -18,10 +19,13 @@
 ## 0. Scope
 
 Four features reach the model through the same mechanism: a function
-defined in a `BASH_ENV` init file. `job`, `search`, and `decide` exec
-the rhema binary in a hidden mode; `see` is shell text that stages an
-image with the core utilities. `mcp` moved to its own CLI. Each one is
-placed wherever the session's bash runs.
+defined in a `BASH_ENV` init file. `job` execs the installed helper
+(`gob` comes with it). `see` is shell text that stages an image.
+`search` and `decide` are shell text over a per-session host endpoint:
+the function sends its argv to the host over a Unix socket, and the
+host resolves the profile, providers, and keys in its own memory.
+`mcp` moved to its own CLI. Each one is placed wherever the session's
+bash runs.
 
 **In scope:** one kit description shared by the four; placement into a
 local temp dir, a backend-shared dir, or a sandbox-side cache;
@@ -397,8 +401,8 @@ same way.
 |---|---|---|---|---|---|
 | jobs | yes | yes: the jobs dir, or a pull | no | no | `gob` comes with the install |
 | vision | no | yes: the staging dir, or a pull | no | no | shell macro; fs-disjoint pulls the staged files |
-| search | yes | no | no | yes: injected | the host resolves the chain, the sandbox gets it in env |
-| decide | yes | no | no | yes: injected | same, one active instance |
+| search | no | no | yes: host endpoint | no | shell macro; host resolves and runs the chain |
+| decide | no | no | yes: host endpoint | no | shell macro; host resolves and runs the instance |
 | mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |
 
 The host-read state is two things: vision's staging dir (the images the
@@ -409,38 +413,40 @@ media is written and read in the sandbox; the host sees it through
 vision only when the model attaches an image. `search` and `decide`
 keep no state.
 
-The kit unifies the helper and the shared-state placement. Credentials
-take the injected-env route in v1:
+The kit unifies the helper and the shared-state placement. `search`
+and `decide` take the host-endpoint route:
 
-- The host resolves the profile and the keychain, then puts the result
-  in the session env: `RHEMA_SEARCH_CHAIN` (a JSON array of
-  `{name, provider, key}`, one per configured entry) and
-  `RHEMA_DECISION_INSTANCE` (the active instance with its key, model,
-  and base URL filled in). The helper builds the chain from those
-  variables; it never reads a config file or a secret store in the
-  sandbox.
-- The switch is `sandbox.inject_credentials` (default false). Every
-  command the model runs can read the variables, so turning this on is
-  a trust decision about the sandbox, not a plumbing default.
-- The host bridge stays the v2 option for keeping keys out of the
-  sandbox. It costs a request/response protocol beside the MCP
-  transport; the env route costs nothing and leaks the keys to the
-  guest.
+- The host binds one Unix socket per session under the shared session
+  tree, or a host temp directory for a local session. The shell gets
+  `RHEMA_CAP_SOCKET` and a per-session bearer token; no provider key
+  enters the sandbox.
+- `POST /v1/search` carries `{"argv": [...]}`; `POST /v1/decide`
+  carries the argv and any stdin. The host resolves the profile and
+  the keychain once at setup, keeps the chain or decision instance in
+  process, and answers `{"code", "stdout", "stderr"}`.
+- Docker, LXD, and ecrou reach the socket through the runtime mount.
+  SSH asks the backend for a reverse Unix-socket forward. HTTP has no
+  route yet, so its macros stay off with a notice.
+- `sandbox.inject_credentials` no longer wires these macros. The
+  `RHEMA_SEARCH_CHAIN` and `RHEMA_DECISION_INSTANCE` env forms remain
+  only as the standalone CLI's diagnostic path, not the session route.
 
 ## 9. Security
 
 - Runtime dirs are `0700`; init files and the UDS `0600`; the installed
   helper `0755`; media `0700`, files `0600` (the CLI already enforces the
   last two).
-- The token is the bridge's auth. A socket in a shared root is visible
-  to the host user's processes; the token, not the path, is the boundary.
+- The token is the host endpoint's auth. A socket in a shared root is
+  visible to the host user's processes; the token, not the path, is
+  the boundary. The token scopes one session to `search` and `decide`,
+  not to the keychain.
 - The helper is installed by the sandbox's own installer from a
   checksum-verified tarball, and must report a compatible
   `__kit-version`; otherwise the kit is skipped. The install never
   replaces the user's own `rhema`.
-- No init file carries a secret. Search and decide keys ride the
-  session env, only when `sandbox.inject_credentials` is on; every
-  command in the sandbox can read them.
+- No init file carries a secret. The search and decide keys stay in
+  the host process; the sandbox sees only the session socket and its
+  token.
 - The fallback root `<workspace>/.rhema/runtime` joins the workspace's
   git exclude the same way the ecrou git-env already excludes `.rhema/`.
   The primary root sits outside the checkout, so a checkout never holds
@@ -504,10 +510,11 @@ runtime mounts, the in-sandbox installer, the shared MCP bridge, and
 the ssh/http sandbox placement are in. On every backend the kits ride
 `__kit-version` and run the installed helper. SSH and HTTP run the
 installer into `$HOME/.cache/rhema` and read the init file and the
-per-session state from there. Search and decide ride the injected-env
-route behind `sandbox.inject_credentials`. Ecrou now enables the MCP
-bridge over its virtiofs share; the UDS is unproven there, so a failed
-bind keeps MCP off and leaves the other kits running.
+per-session state from there. Search and decide ride the per-session host
+endpoint on local, Docker, LXD, ecrou, and SSH. HTTP has no host route
+yet. Ecrou now enables the MCP bridge over its virtiofs share; the UDS
+is unproven there, so a failed bind keeps MCP off and leaves the other
+kits running.
 
 Jobs and vision now provision their state under the shared session
 tree and the shell's env names those paths. Vision works on docker,

@@ -147,4 +147,19 @@ pub trait Sandbox: Send + Sync {
     /// session's skills and SYSTEM.md reach the sandbox, the model
     /// reads them through `bash`, like any other file.
     async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError>;
+
+    /// Makes a host Unix socket reachable at `remote` inside the
+    /// sandbox, for the session's host endpoint. A backend that shares
+    /// a filesystem path with the host needs no forwarding; this is
+    /// the SSH backend's reverse socket forward. The default says the
+    /// backend has no route.
+    async fn forward_host_call(
+        &self,
+        _remote: &str,
+        _local: &std::path::Path,
+    ) -> Result<(), SandboxError> {
+        Err(SandboxError::Unavailable(
+            "this backend has no host-socket forward".to_owned(),
+        ))
+    }
 }

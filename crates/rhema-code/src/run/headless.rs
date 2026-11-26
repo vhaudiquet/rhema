@@ -314,17 +314,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         secrets.as_deref(),
         sandboxed.as_ref(),
         None,
-    )
-    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    );
+    if let Some(wiring) = &search {
+        kits_registry.keep(wiring.clone());
+    }
+    let search = search.map(|wiring| (wiring.shell_env.clone(), wiring.section));
     if let Some((env, section)) = search {
-        kits.push(crate::app::kit_for(
+        kits.push(crate::app::kit_for_shell(
             rhema_bash::runtime::Feature::Search,
             env,
-            vec![crate::app::builtin_stub(
-                rhema_bash::websearch::NAME,
-                rhema_bash::websearch::VAR_BIN,
-                vec![rhema_bash::websearch::MODE],
-            )],
+            crate::app::search_shell(),
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
         sections.insert(rhema_bash::runtime::Feature::Search, section);
@@ -335,17 +334,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         secrets.as_deref(),
         sandboxed.as_ref(),
         None,
-    )
-    .map(|wiring| (wiring.shell_env.clone(), wiring.section));
+    );
+    if let Some(wiring) = &decision {
+        kits_registry.keep(wiring.clone());
+    }
+    let decision = decision.map(|wiring| (wiring.shell_env.clone(), wiring.section));
     if let Some((env, section)) = decision {
-        kits.push(crate::app::kit_for(
+        kits.push(crate::app::kit_for_shell(
             rhema_bash::runtime::Feature::Decision,
             env,
-            vec![crate::app::builtin_stub(
-                rhema_bash::decision::NAME,
-                rhema_bash::decision::VAR_BIN,
-                vec![rhema_bash::decision::MODE],
-            )],
+            crate::app::decision_shell(),
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
         sections.insert(rhema_bash::runtime::Feature::Decision, section);

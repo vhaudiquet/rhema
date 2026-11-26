@@ -7,6 +7,13 @@
 
 use std::collections::BTreeMap;
 
+/// The env var naming the session's host endpoint socket, when one is
+/// wired. The `search` and `decide` shell macros read it; a session
+/// without it leaves both macros off.
+pub const VAR_CAP_SOCKET: &str = "RHEMA_CAP_SOCKET";
+/// The env var carrying the endpoint's per-session bearer token.
+pub const VAR_CAP_TOKEN: &str = "RHEMA_CAP_TOKEN";
+
 /// The kit's on-disk contract. A helper whose `__kit-version` differs
 /// is not used: the host and the init file must agree on the stub
 /// shape.

@@ -4255,6 +4255,7 @@ dependencies = [
  "image",
  "openssl",
  "pulldown-cmark",
+ "rand 0.10.4",
  "ratatui",
  "rhema-acp",
  "rhema-bash",

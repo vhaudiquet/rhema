@@ -123,6 +123,8 @@ serde_yaml.workspace = true
 sha2 = "0.11"
 # A private, uniquely named file for the fetched install script
 tempfile = "3"
+# The host endpoint's per-session bearer token
+rand = "0.10"
 
 [dev-dependencies]
 # The __search mode tests drive a scripted chain

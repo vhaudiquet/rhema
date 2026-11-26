@@ -79,6 +79,45 @@ pub const EXIT_NOT_WIRED: i32 = 4;
 /// verbatim.
 pub const PROMPT_SECTION: &str = include_str!("../SYSTEM_SEARCH.md");
 
+/// The `search` function a host endpoint session installs. The
+/// function sends its argv to the host over the session's Unix
+/// socket; the provider keys stay on the host.
+pub const SHELL_BODY: &str = r#"if [ -z "${RHEMA_CAP_SOCKET:-}" ] || [ -z "${RHEMA_CAP_TOKEN:-}" ]; then
+  printf '%s\n' "search is not available in this session" >&2
+  return 4
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  printf '%s\n' "search: curl is required in this sandbox" >&2
+  return 4
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  printf '%s\n' "search: jq is required in this sandbox" >&2
+  return 4
+fi
+local __rhema_body __rhema_reply __rhema_code
+__rhema_body=$(jq -cn --args '{argv:$ARGS.positional}' -- "$@") || {
+  printf '%s\n' "search: could not encode the request" >&2
+  return 2
+}
+local __rhema_try=0
+while ! __rhema_reply=$(curl -sS --unix-socket "$RHEMA_CAP_SOCKET" \
+    -H "Authorization: Bearer $RHEMA_CAP_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -X POST --data-binary "$__rhema_body" \
+    http://localhost/v1/search 2>/dev/null); do
+  __rhema_try=$((__rhema_try + 1))
+  if [ "$__rhema_try" -ge 20 ]; then
+    printf '%s\n' "search: the host endpoint is unreachable" >&2
+    return 4
+  fi
+  sleep 0.1
+done
+__rhema_code=$(printf '%s' "$__rhema_reply" | jq -r '.code // 1' 2>/dev/null) || __rhema_code=1
+printf '%s' "$__rhema_reply" | jq -j '.stdout // ""' 2>/dev/null
+printf '%s' "$__rhema_reply" | jq -j '.stderr // ""' 2>/dev/null >&2
+return "$__rhema_code"
+"#;
+
 /// One process's wiring: the env map a frontend layers over
 /// `HostAgentConfig::shell_env`, the prompt section to render, and
 /// the provisioned init file held for the process's life.
@@ -95,6 +134,10 @@ pub struct Wiring {
     /// bakes into its own init as the literal predecessor, so every
     /// generated file loads in one chain.
     pub init_path: PathBuf,
+    /// An owner the wiring keeps alive for its lifetime, when the
+    /// macro talks to a host endpoint. The endpoint is a socket
+    /// listener; dropping the last wiring closes it.
+    pub keepalive: Option<Arc<dyn std::any::Any + Send + Sync>>,
     dir: PathBuf,
 }
 
@@ -166,6 +209,28 @@ fn provision_inner(
         shell_env,
         section: PROMPT_SECTION,
         init_path,
+        keepalive: None,
+        dir,
+    })
+}
+
+/// The host-endpoint provision: the env map the frontend built, and
+/// the endpoint's owner kept alive beside it. No helper binary, no
+/// profile name, and no key rides the shell.
+///
+/// # Errors
+///
+/// The wiring's own temp directory cannot be created.
+pub fn provision_host_call(
+    shell_env: BTreeMap<String, String>,
+    keepalive: Arc<dyn std::any::Any + Send + Sync>,
+) -> std::io::Result<Wiring> {
+    let dir = crate::init::temp_dir("rhema-search")?;
+    Ok(Wiring {
+        shell_env,
+        section: PROMPT_SECTION,
+        init_path: dir.join("init.bash"),
+        keepalive: Some(keepalive),
         dir,
     })
 }

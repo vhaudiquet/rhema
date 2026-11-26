@@ -1,29 +1,22 @@
 //! The `__search` mode and the session wiring: the `search` macro's
 //! other end.
 //!
-//! The agent's shell execs `rhema __search "query"`; this module owns
-//! the pass-through: it parses the flags, resolves the profile the
-//! wiring named, assembles that profile's chain through the registry,
-//! runs the query, and prints the markdown. The settings are read
-//! fresh per call, so a provider added mid-session serves the next
-//! `search` without a restart; the profile is the wiring's env var,
-//! pinned at session start, the one per-session input a standalone
-//! exec can carry without session state.
+//! The agent's shell calls the session's `search` function. A local
+//! shell execs `rhema __search "query"`; a sandboxed one posts the
+//! argv to the host endpoint in [`crate::cap`]. Both paths share the
+//! same parser, the same chain, and the same renderer, so the two
+//! transports cannot drift.
 //!
 //! A profile with no providers wires nothing, no function and no
-//! prompt section (`specs/rhema-websearch.md` §8). A sandboxed session
-//! wires only when the sandbox has the installed helper and the
-//! profile opts into credential injection: the helper runs the mode,
-//! the host supplies the resolved chain. One wiring per session key,
-//! held for the process, because the
-//! init file's env map is per-profile and a profile switch re-runs
-//! the assembly: the same shape the MCP registry keeps.
+//! prompt section (`specs/rhema-websearch.md` §8). The host resolves
+//! the profile's chain once, at session setup, and keeps it in this
+//! process. The sandbox sees the session socket and its token, never a
+//! provider key.
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
@@ -44,64 +37,21 @@ const USAGE: &str = "search: web search through this session's providers
     exit 0: results printed      exit 1: every provider failed
     exit 2: bad usage            exit 4: not wired in this shell";
 
-/// One session's wiring, the sandbox wiring shape: the provisioned init
-/// file held for the process's life, one per session key.
-static WIRED: OnceLock<Mutex<BTreeMap<String, Arc<rhema_bash::websearch::Wiring>>>> =
-    OnceLock::new();
-
-fn registry() -> &'static Mutex<BTreeMap<String, Arc<rhema_bash::websearch::Wiring>>> {
-    WIRED.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-/// Wires the session's search macro, the setup's call: the gate first
-/// (a sandboxed session and a providerless profile both wire
-/// nothing), then one provision per session key. `None` when the gate
-/// closes: the caller renders no section, the agent sees no function.
+/// Wires the session's search macro: the profile's chain is resolved
+/// here, in the host process, and the shell only gets the session
+/// endpoint's socket and token. `None` when the profile has no chain
+/// or the backend has no route to the host endpoint.
 pub(crate) fn wire_for_session(
     session_key: &str,
     profile: &Profile,
     secrets: Option<&dyn SecretStore>,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
-    bash_env: Option<std::ffi::OsString>,
+    _bash_env: Option<OsString>,
 ) -> Option<Arc<rhema_bash::websearch::Wiring>> {
-    // The gate answers the only question the settings can: does this
-    // profile have providers to try? The chain itself is not cached;
-    // the mode handler assembles fresh per invocation, so added
-    // providers land without a restart.
-    let selected = rhema_websearch_registry::selections(Some(profile), secrets);
-    if selected.is_empty() {
-        return None;
-    }
-    // The injected route needs the opt-in and an installed helper.
-    // A mounted sandbox has one under the shared root; a sandbox with
-    // no root has one in its own cache.
-    let inject =
-        sandboxed.is_none_or(|s| s.helper_available()) && profile.sandbox_inject_credentials();
-    if sandboxed.is_some() && !inject {
-        return None;
-    }
-    let mut reg = registry().lock().expect("search wire registry lock");
-    if let Some(wiring) = reg.get(session_key) {
-        return Some(wiring.clone());
-    }
-    let bin = std::env::current_exe().ok()?;
-    let mut wiring = rhema_bash::websearch::provision_with_bin(bash_env, &bin, session_key).ok()?;
-    if inject {
-        // The profile resolved here; the sandbox gets the instances
-        // and their keys, not a config file it cannot read.
-        let payload: Vec<serde_json::Value> = selected
-            .iter()
-            .map(|(name, provider, key)| {
-                serde_json::json!({"name": name, "provider": provider, "key": key})
-            })
-            .collect();
-        wiring
-            .shell_env
-            .insert(VAR_CHAIN.to_owned(), serde_json::to_string(&payload).ok()?);
-    }
-    let wiring = Arc::new(wiring);
-    reg.insert(session_key.to_owned(), wiring.clone());
-    Some(wiring)
+    let chain = rhema_websearch_registry::assemble_chain(Some(profile), secrets)?;
+    let endpoint = crate::cap::wire(session_key, sandboxed, crate::cap::Block::Search(chain))?;
+    let wiring = rhema_bash::websearch::provision_host_call(endpoint.env(), endpoint).ok()?;
+    Some(Arc::new(wiring))
 }
 
 /// One parsed invocation: the query text and the two flags. `parse`
@@ -153,6 +103,14 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, ()> {
     })
 }
 
+/// One invocation's whole answer before it reaches a stream. The
+/// modes print it; the host endpoint serializes it.
+pub(crate) struct Outcome {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Runs one invocation against a caller-supplied chain and prints the
 /// answer: the markdown on stdout, the failure's own text on stderr,
 /// the exit codes the usage table names. The seam the CLI tests
@@ -165,6 +123,18 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, ()> {
 /// panic with the nested-runtime error. A fresh thread is outside
 /// any runtime, whichever side spawns the mode.
 pub(crate) fn run(invocation: &Invocation, chain: &rhema_websearch::Chain) -> i32 {
+    let outcome = run_outcome(invocation, chain);
+    if !outcome.stdout.is_empty() {
+        print!("{}", outcome.stdout);
+    }
+    if !outcome.stderr.is_empty() {
+        eprint!("{}", outcome.stderr);
+    }
+    outcome.code
+}
+
+/// [`run`] without the printing: the host endpoint's seam.
+pub(crate) fn run_outcome(invocation: &Invocation, chain: &rhema_websearch::Chain) -> Outcome {
     let invocation = invocation.clone();
     let chain = chain.clone();
     let outcome = std::thread::scope(|scope| {
@@ -180,14 +150,30 @@ pub(crate) fn run(invocation: &Invocation, chain: &rhema_websearch::Chain) -> i3
             .expect("the search thread carries no panic of its own")
     });
     match outcome {
-        Ok(outcome) => {
-            println!("{}", rhema_websearch::render(&outcome));
-            0
-        }
-        Err(err) => {
-            eprintln!("search: {err}");
-            1
-        }
+        Ok(outcome) => Outcome {
+            code: 0,
+            stdout: format!("{}\n", rhema_websearch::render(&outcome)),
+            stderr: String::new(),
+        },
+        Err(err) => Outcome {
+            code: 1,
+            stdout: String::new(),
+            stderr: format!("search: {err}\n"),
+        },
+    }
+}
+
+/// Parses and runs one host endpoint request: the argv the shell
+/// sent, against the chain the host resolved at wiring time.
+pub(crate) fn execute_argv(argv: &[String], chain: &rhema_websearch::Chain) -> Outcome {
+    let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    match parse(&args) {
+        Ok(invocation) => run_outcome(&invocation, chain),
+        Err(()) => Outcome {
+            code: rhema_bash::websearch::EXIT_USAGE,
+            stdout: String::new(),
+            stderr: format!("{USAGE}\n"),
+        },
     }
 }
 
@@ -510,48 +496,47 @@ mod sandbox_tests {
     }
 
     #[test]
-    fn an_ssh_sandbox_with_the_installed_helper_wires_the_chain() {
+    fn a_remote_sandbox_with_no_forward_path_does_not_wire() {
         let sandboxed = remote_sandbox();
-        let wiring = wire_for_session(
-            "sandbox-search-ssh-inject",
-            &profile(true),
-            None,
-            Some(&sandboxed),
-            None,
-        )
-        .expect("an opted-in ssh session wires");
-        let raw = wiring.shell_env.get(VAR_CHAIN).expect("the chain env");
-        assert!(raw.contains("literal-key"), "{raw}");
-    }
-
-    #[test]
-    fn the_resolved_chain_crosses_in_env_when_opted_in() {
-        let (sandboxed, _dir) = sandboxed(true);
-        let wiring = wire_for_session(
-            "sandbox-search-inject",
-            &profile(true),
-            None,
-            Some(&sandboxed),
-            None,
-        )
-        .expect("the opted-in session wires");
-        let raw = wiring.shell_env.get(VAR_CHAIN).expect("the chain env");
-        assert!(raw.contains("exa-work"), "{raw}");
-        assert!(raw.contains("literal-key"), "{raw}");
-    }
-
-    #[test]
-    fn without_the_opt_in_a_sandboxed_session_does_not_wire() {
-        let (sandboxed, _dir) = sandboxed(true);
         assert!(
             wire_for_session(
-                "sandbox-search-no-inject",
-                &profile(false),
+                "sandbox-search-ssh-no-forward",
+                &profile(true),
                 None,
                 Some(&sandboxed),
                 None,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_mounted_sandbox_wires_the_endpoint_and_never_the_key() {
+        let (sandboxed, _dir) = sandboxed(true);
+        let wiring = wire_for_session(
+            "sandbox-search-endpoint",
+            &profile(true),
+            None,
+            Some(&sandboxed),
+            None,
+        )
+        .expect("the mounted session wires");
+        let socket = wiring
+            .shell_env
+            .get(rhema_bash::runtime::VAR_CAP_SOCKET)
+            .expect("the cap socket");
+        assert!(socket.ends_with("cap.sock"), "{socket}");
+        assert!(
+            wiring
+                .shell_env
+                .get(rhema_bash::runtime::VAR_CAP_TOKEN)
+                .is_some_and(|token| token.len() == 64)
+        );
+        assert!(
+            wiring
+                .shell_env
+                .values()
+                .all(|value| !value.contains("literal-key"))
         );
     }
 }

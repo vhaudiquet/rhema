@@ -59,6 +59,7 @@ pub mod app;
 pub mod approval;
 pub mod args;
 pub mod bundled;
+mod cap;
 pub mod commands;
 pub mod cursor;
 pub(crate) mod decision_wire;

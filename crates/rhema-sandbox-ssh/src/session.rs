@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::client::{self, Handle};
+use russh::client::{self, ChannelOpenHandle, Handle};
 #[cfg(unix)]
 use russh::keys::agent::client::AgentClient;
 use russh::keys::known_hosts::{
@@ -182,6 +182,10 @@ impl Verdict {
 /// stored entry refuses, and so does an unknown key when the user's
 /// config set `StrictHostKeyChecking yes`.
 pub(crate) struct HostKey {
+    /// The local socket a reverse-forwarded UDS connection lands on.
+    /// `None` on the command connections, which accept no forwarded
+    /// channel.
+    pub(crate) forward_to: Option<PathBuf>,
     /// Where the host keys live, `None` for the default file.
     pub(crate) known_hosts: Option<PathBuf>,
     /// The resolved host and port, what a `known_hosts` entry is
@@ -283,6 +287,108 @@ impl client::Handler for HostKey {
             }
         }
     }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: Channel<client::Msg>,
+        _socket_path: &str,
+        reply: ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(local) = self.forward_to.clone() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        reply.accept().await;
+        tokio::spawn(async move {
+            let Ok(mut stream) = tokio::net::UnixStream::connect(&local).await else {
+                return;
+            };
+            let mut channel = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut channel, &mut stream).await;
+        });
+        Ok(())
+    }
+}
+
+/// Connects and authenticates one client session, optionally ready to
+/// carry reverse-forwarded Unix sockets. The command routes and the
+/// forward share every step but the handler's destination.
+async fn connect(
+    destination: &str,
+    private_key: Option<&str>,
+    known_hosts: Option<&std::path::Path>,
+    strict: Option<bool>,
+    ssh_config: Option<&std::path::Path>,
+    forward_to: Option<PathBuf>,
+) -> Result<Handle<HostKey>, SandboxError> {
+    let target = Target::resolve(destination, ssh_config)?;
+    let verdict = Verdict::default();
+    let config = Arc::new(client::Config::default());
+    let handler = HostKey {
+        forward_to,
+        known_hosts: known_hosts
+            .map(PathBuf::from)
+            .or_else(|| target.known_hosts.clone()),
+        target: (target.host.clone(), target.port),
+        strict: strict.unwrap_or(target.strict),
+        verdict: verdict.clone(),
+    };
+    let mut connection =
+        match client::connect(config, (target.host.as_str(), target.port), handler).await {
+            Ok(connection) => connection,
+            Err(err) => {
+                let detail = verdict.reason().unwrap_or_else(|| err.to_string());
+                return Err(SandboxError::Unavailable(format!(
+                    "the ssh sandbox cannot reach {host}:{port}: {detail}",
+                    host = target.host,
+                    port = target.port,
+                )));
+            }
+        };
+    authenticate(&mut connection, &target, private_key).await?;
+    Ok(connection)
+}
+
+/// Opens one persistent connection whose server-opened forwarded
+/// streamlocal channels land on `local`, and asks the far end to
+/// listen at `remote`. The returned handle is the forward's life: drop
+/// it and the server closes the remote socket.
+pub(crate) async fn open_forward(
+    destination: &str,
+    private_key: Option<&str>,
+    known_hosts: Option<&std::path::Path>,
+    strict: Option<bool>,
+    ssh_config: Option<&std::path::Path>,
+    remote: &str,
+    local: &std::path::Path,
+) -> Result<Handle<HostKey>, SandboxError> {
+    let connection = connect(
+        destination,
+        private_key,
+        known_hosts,
+        strict,
+        ssh_config,
+        Some(local.to_path_buf()),
+    )
+    .await?;
+    connection
+        .streamlocal_forward(remote.to_owned())
+        .await
+        .map_err(|err| {
+            SandboxError::Unavailable(format!(
+                "the far end refused the reverse socket {remote}: {err}"
+            ))
+        })?;
+    Ok(connection)
+}
+
+/// One live reverse-forward connection: dropping it drops the
+/// connection, and the far end closes the remote socket.
+pub(crate) struct Forward {
+    pub(crate) _connection: Handle<HostKey>,
 }
 
 /// One remote call: the connection and the channel a command runs
@@ -315,30 +421,15 @@ impl RemoteCall {
         ssh_config: Option<&std::path::Path>,
         command: &str,
     ) -> Result<Self, SandboxError> {
-        let target = Target::resolve(destination, ssh_config)?;
-        let verdict = Verdict::default();
-        let config = Arc::new(client::Config::default());
-        let handler = HostKey {
-            known_hosts: known_hosts
-                .map(PathBuf::from)
-                .or_else(|| target.known_hosts.clone()),
-            target: (target.host.clone(), target.port),
-            strict: strict.unwrap_or(target.strict),
-            verdict: verdict.clone(),
-        };
-        let mut connection =
-            match client::connect(config, (target.host.as_str(), target.port), handler).await {
-                Ok(connection) => connection,
-                Err(err) => {
-                    let detail = verdict.reason().unwrap_or_else(|| err.to_string());
-                    return Err(SandboxError::Unavailable(format!(
-                        "the ssh sandbox cannot reach {host}:{port}: {detail}",
-                        host = target.host,
-                        port = target.port,
-                    )));
-                }
-            };
-        authenticate(&mut connection, &target, private_key).await?;
+        let connection = connect(
+            destination,
+            private_key,
+            known_hosts,
+            strict,
+            ssh_config,
+            None,
+        )
+        .await?;
         let channel = connection.channel_open_session().await.map_err(|err| {
             SandboxError::Unavailable(format!("the far end refused a channel: {err}"))
         })?;

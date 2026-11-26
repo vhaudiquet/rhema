@@ -71,7 +71,7 @@ const FS_BUDGET: Duration = Duration::from_secs(60);
 /// Cancelling mid-run drops the connection; the remote command may
 /// finish on the far end, ssh carries no cancel, and this type does
 /// not pretend otherwise.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshSandbox {
     /// The ssh destination, resolved against the local config on
     /// every call.
@@ -96,6 +96,19 @@ pub struct SshSandbox {
     /// `~/.ssh/config`.
     #[cfg(feature = "test-util")]
     ssh_config: Option<PathBuf>,
+    /// The live reverse-forward connection for the session's host
+    /// endpoint, when one was asked for. Clones share it.
+    forward: std::sync::Arc<std::sync::Mutex<Option<session::Forward>>>,
+}
+
+impl std::fmt::Debug for SshSandbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshSandbox")
+            .field("host", &self.host)
+            .field("workspace", &self.workspace)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SshSandbox {
@@ -111,6 +124,7 @@ impl SshSandbox {
             strict: None,
             #[cfg(feature = "test-util")]
             ssh_config: None,
+            forward: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -165,6 +179,43 @@ impl SshSandbox {
     pub fn with_ssh_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.ssh_config = Some(path.into());
         self
+    }
+
+    /// Starts a reverse Unix-socket forward: the far end listens at
+    /// `remote`, and every connection there is pumped to the host's
+    /// `local` socket. The connection is kept for the sandbox's life;
+    /// a second call replaces the old forward.
+    async fn forward_socket(
+        &self,
+        remote: &str,
+        local: &std::path::Path,
+    ) -> Result<(), SandboxError> {
+        let parent = std::path::Path::new(remote)
+            .parent()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/tmp".to_owned());
+        let prepare = format!("mkdir -p {} && rm -f {}", shquote(&parent), shquote(remote));
+        let (code, stderr) = self.feed(FS_BUDGET, &prepare, Vec::new()).await?;
+        if code != Some(0) {
+            return Err(remote_failure(code, &stderr));
+        }
+        let forward = session::open_forward(
+            &self.host,
+            self.private_key.as_deref(),
+            self.known_hosts_path(),
+            self.strict_host_keys(),
+            self.config_path(),
+            remote,
+            local,
+        )
+        .await?;
+        *self
+            .forward
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session::Forward {
+            _connection: forward,
+        });
+        Ok(())
     }
 
     /// Feeds one remote call `bytes` on its stdin (the end of input
@@ -483,6 +534,14 @@ impl Sandbox for SshSandbox {
         }
         Ok(())
     }
+
+    async fn forward_host_call(
+        &self,
+        remote: &str,
+        local: &std::path::Path,
+    ) -> Result<(), SandboxError> {
+        self.forward_socket(remote, local).await
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -686,6 +745,7 @@ mod tests {
     ) -> (bool, Option<String>) {
         let verdict = Verdict::default();
         let mut handler = session::HostKey {
+            forward_to: None,
             known_hosts: Some(known_hosts.to_path_buf()),
             target: ("127.0.0.1".to_owned(), 2222),
             strict,
