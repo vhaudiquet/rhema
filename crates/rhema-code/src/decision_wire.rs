@@ -256,6 +256,9 @@ pub(crate) fn run_outcome(invocation: &Invocation, provider: Arc<dyn DecisionPro
 /// Parses and runs one host endpoint request: the argv the shell
 /// sent, plus its stdin, against the instance the host resolved at
 /// wiring time.
+// Only the Unix host endpoint calls this; the stub has no request
+// to run.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn execute_argv(
     argv: &[String],
     stdin: &str,

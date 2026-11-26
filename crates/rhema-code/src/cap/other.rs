@@ -4,6 +4,9 @@
 //! simply do not render.
 
 #![forbid(unsafe_code)]
+// The module exists so the shared call sites type-check without a
+// socket; `wire` always returns None, so nothing here is read.
+#![allow(dead_code)]
 
 use rhema_config::DecisionInstance;
 

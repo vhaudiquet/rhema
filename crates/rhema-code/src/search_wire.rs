@@ -165,6 +165,9 @@ pub(crate) fn run_outcome(invocation: &Invocation, chain: &rhema_websearch::Chai
 
 /// Parses and runs one host endpoint request: the argv the shell
 /// sent, against the chain the host resolved at wiring time.
+// Only the Unix host endpoint calls this; the stub has no request
+// to run.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn execute_argv(argv: &[String], chain: &rhema_websearch::Chain) -> Outcome {
     let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
     match parse(&args) {
