@@ -84,6 +84,22 @@ impl GoogleProvider {
     }
 }
 
+/// Percent-encodes one URL path segment or query value: everything but
+/// the unreserved set becomes `%XX`. Model ids and base64 page tokens
+/// both carry bytes that mean something else in a URL.
+fn encode_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
 /// be carried in [`ProviderError`] directly (it is `Clone + Eq`).
 fn network_error(err: reqwest::Error) -> ProviderError {
@@ -195,7 +211,10 @@ impl ModelListing for GoogleProvider {
         loop {
             let mut url = format!("{}/models?pageSize=1000", self.base_url);
             if let Some(token) = &page_token {
-                url.push_str(&format!("&pageToken={token}"));
+                // A base64 token carries `+`, `/`, and `=`; unencoded,
+                // the first reads as a space and pagination silently
+                // re-requests page one.
+                url.push_str(&format!("&pageToken={}", encode_component(token)));
             }
             let response = self
                 .http
@@ -300,9 +319,12 @@ impl GoogleProvider {
         let model = req.params.model.trim();
         // `models/` is the wire prefix; accept both spellings.
         let model = model.strip_prefix("models/").unwrap_or(model);
+        // The model id is caller-supplied: a `/` or `?` in it would
+        // otherwise rewrite the route.
         let url = format!(
-            "{}/models/{model}:streamGenerateContent?alt=sse",
-            self.base_url
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            self.base_url,
+            encode_component(model)
         );
 
         let response = self
@@ -423,5 +445,24 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
         // The plain data stays visible.
         assert!(printed.contains("base_url"), "{printed}");
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::encode_component;
+
+    #[test]
+    fn a_model_id_survives_as_a_path_segment() {
+        assert_eq!(encode_component("gemini-2.5-flash"), "gemini-2.5-flash");
+        assert_eq!(encode_component("tuned/../models"), "tuned%2F..%2Fmodels");
+        assert_eq!(encode_component("a b?c"), "a%20b%3Fc");
+    }
+
+    #[test]
+    fn a_base64_page_token_survives_as_a_query_value() {
+        // `/`, `+`, and `=` are the three bytes base64 adds beyond the
+        // unreserved set.
+        assert_eq!(encode_component("a+b/c="), "a%2Bb%2Fc%3D");
     }
 }
