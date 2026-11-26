@@ -316,17 +316,32 @@ pub async fn ensure_shared(
     run_command(sandbox, command, "the init generator").await?;
 
     let helper = helper.to_string_lossy().into_owned();
+    let helper_dir = Path::new(&helper)
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // A shared root gives the host the generated file. A test
+    // sandbox may answer without writing it; then there is nothing
+    // to prepend and the env still names the helper directly.
+    if let Ok(text) = std::fs::read_to_string(&init) {
+        std::fs::write(
+            &init,
+            format!("export PATH={}:\"$PATH\"\n{text}", shquote(&helper_dir)),
+        )?;
+    }
     let mut env = BTreeMap::new();
     env.insert(
         "BASH_ENV".to_owned(),
         sandbox_init.to_string_lossy().into_owned(),
     );
     for kit in &decided {
-        for stub in &kit.stubs {
-            env.insert(stub.bin_var.clone(), helper.clone());
-        }
         for (key, value) in &kit.vars {
             env.insert(key.clone(), value.clone());
+        }
+        // Last: the wiring's own env names the host binary. The
+        // sandbox runs the installed helper, never that path.
+        for stub in &kit.stubs {
+            env.insert(stub.bin_var.clone(), helper.clone());
         }
     }
     // Last: a wiring that provisioned its own init file carries a
@@ -381,8 +396,9 @@ pub fn place_shared(shared: &SharedRoot, session: &str, kits: &[Kit]) -> std::io
         std::fs::create_dir_all(host_session.join(sub))?;
     }
     let init = write_init(&host_session, kits)?;
-    let helper = shared
-        .install_dir(&KIT_VERSION.to_string())
+    let helper = Path::new(&shared.sandbox)
+        .join("bin")
+        .join(KIT_VERSION.to_string())
         .join("rhema")
         .to_string_lossy()
         .into_owned();
@@ -400,11 +416,13 @@ pub fn place_shared(shared: &SharedRoot, session: &str, kits: &[Kit]) -> std::io
     let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
     let mut env = BTreeMap::new();
     for kit in kits {
-        for stub in &kit.stubs {
-            env.insert(stub.bin_var.clone(), helper.clone());
-        }
         for (key, value) in &kit.vars {
             env.insert(key.clone(), value.clone());
+        }
+        // Last: the wiring's own env names the host binary. The
+        // sandbox runs the installed helper, never that path.
+        for stub in &kit.stubs {
+            env.insert(stub.bin_var.clone(), helper.clone());
         }
     }
     // Last: a wiring that provisioned its own init file carries a
@@ -585,11 +603,14 @@ mod tests {
     fn the_shared_placement_writes_the_init_and_env() {
         let dir = tempfile::tempdir().unwrap();
         let shared = SharedRoot::new(dir.path());
-        let kit = Kit::new(
+        let mut kit = Kit::new(
             Feature::Jobs,
             vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
             Needs::MACRO,
         );
+        kit.vars
+            .insert("RHEMA_JOBS_BIN".into(), "/host/bin/rhema".into());
+        kit.vars.insert("RHEMA_SEARCH_CHAIN".into(), "[]".into());
         let placed = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
         let env = placed.env;
         let init = env.get("BASH_ENV").expect("init");
@@ -617,6 +638,10 @@ mod tests {
                     .to_string_lossy()
                     .as_ref()
             )
+        );
+        assert_eq!(
+            env.get("RHEMA_SEARCH_CHAIN").map(String::as_str),
+            Some("[]")
         );
         assert!(dir.path().join("sessions/s1/jobs/session").is_file());
     }
@@ -727,11 +752,13 @@ mod tests {
         use crate::mock::ScriptedSandbox;
         let dir = tempfile::tempdir().unwrap();
         let shared = SharedRoot::new(dir.path().join("runtime"));
-        let kit = Kit::new(
+        let mut kit = Kit::new(
             Feature::Jobs,
             vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
             Needs::MACRO,
         );
+        kit.vars
+            .insert("RHEMA_JOBS_BIN".into(), "/host/bin/rhema".into());
         let sandbox = ScriptedSandbox::new();
         for outcome in [
             crate::RunOutcome {
