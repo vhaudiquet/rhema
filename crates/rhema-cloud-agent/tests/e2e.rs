@@ -376,3 +376,35 @@ async fn seeded_skills_reach_the_prompt_without_a_filesystem() {
         "claude-sonnet-4-5"
     );
 }
+
+/// The engine's revive path resolves through `ToolResolver::resolve`,
+/// not the streaming method. Both entries must ask the policy: a gate
+/// that only checks on the streaming path would run a revived call with
+/// nobody's consent.
+#[tokio::test]
+async fn the_plain_resolve_entry_asks_the_policy() {
+    use rhema_bash::ShellTools;
+    use rhema_core::{ToolContext, ToolResolver};
+
+    let sandbox = Arc::new(ScriptedSandbox::new());
+    let shell = Arc::new(ShellTools::with_executor(
+        "/workspace",
+        Arc::new(ShellSandbox::new(sandbox.clone())),
+    ));
+    let gate = rhema_cloud_agent::ClientGate::new(shell, ApprovalPolicy::DenyAll, None);
+    let call = ToolCall {
+        id: "c1".into(),
+        name: "bash".into(),
+        args: serde_json::json!({ "command": "touch /workspace/ran" }),
+        ..ToolCall::default()
+    };
+
+    let result = gate.resolve(call, &ToolContext::default()).await;
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "rejected by user approval");
+    assert!(
+        sandbox.executed().is_empty(),
+        "a denied call never reaches the sandbox"
+    );
+}

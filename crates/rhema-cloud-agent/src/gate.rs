@@ -70,15 +70,24 @@ impl ClientGate {
         }
     }
 
-    /// Delegates to the inner shell with the approval pre-installed: a
-    /// call only reaches here after `decision` answered yes, so the
-    /// per-call hook is an allow and the shell's own gate passes.
+    /// Asks, then delegates to the inner shell with the approval
+    /// pre-installed once the answer is yes, so the per-call hook is an
+    /// allow and the shell's own gate passes. Both entry points land
+    /// here: a replay-safe call revived by the engine reaches `resolve`,
+    /// not `resolve_streaming`, and must be asked about like any other.
     async fn resolve_decided(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
         progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
+        if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return ToolResult::failure(call.id, "cancelled");
+        }
+        if !self.decision(&call).await {
+            // Same text the shell's own gate rejects with.
+            return ToolResult::failure(&call.id, "rejected by user approval");
+        }
         self.inner.install_approval(Arc::new(AllowAll));
         let result = self.inner.resolve_streaming(call, ctx, progress).await;
         // Back to the fail-safe: with the per-call hook cleared, the
@@ -111,13 +120,6 @@ impl ToolResolver for ClientGate {
         ctx: &ToolContext,
         progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
-        if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return ToolResult::failure(call.id, "cancelled");
-        }
-        if !self.decision(&call).await {
-            // Same text the shell's own gate rejects with.
-            return ToolResult::failure(&call.id, "rejected by user approval");
-        }
         self.resolve_decided(call, ctx, progress).await
     }
 }
