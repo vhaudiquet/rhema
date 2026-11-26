@@ -804,6 +804,20 @@ fn set_test_backend(path: Option<PathBuf>) {
     *TEST_BACKEND.lock().expect("the test backend lock") = path;
 }
 
+/// The subscription's watchdog child, killed and reaped when its
+/// iteration ends, whichever way it ends: a reconnect must not leave an
+/// `sh` behind to be reaped only when the frontend exits.
+#[cfg(unix)]
+struct Watchdog(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Sleeps `duration` in slices, so a dropped handle ends the wait
 /// promptly. `true` when the stop flag was seen.
 fn sleep_slices(stop: &AtomicBool, duration: Duration) -> bool {
@@ -874,8 +888,11 @@ fn subscribe(
         // kills the child directly and the watchdog exits at its
         // next check; a killed process leaves the watchdog one sleep
         // behind, then the child dies too.
+        // The handle is held for the iteration so the exit path reaps
+        // it: one `sh` per reconnect used to outlive its own loop as a
+        // zombie under a long-lived frontend.
         #[cfg(unix)]
-        let _ = std::process::Command::new("sh")
+        let _watchdog = std::process::Command::new("sh")
             .arg("-c")
             .arg(
                 r#"while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done
@@ -887,7 +904,9 @@ kill "$2" 2>/dev/null"#,
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+            .ok()
+            .map(Watchdog);
         // Poison only means a panic elsewhere; recovering keeps the
         // child where the handle drop finds and kills it, instead of
         // dropping it here and orphaning the event-stream process.
@@ -896,6 +915,19 @@ kill "$2" 2>/dev/null"#,
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *slot = Some(child);
+        }
+        if stop.load(Ordering::Relaxed) {
+            // The handle dropped while this child was being spawned: its
+            // drop found the slot empty and killed nothing, so this is
+            // the only place that can reap it. Without this the stream
+            // outlives its frontend until the process exits.
+            if let Ok(mut slot) = child_slot.lock()
+                && let Some(mut child) = slot.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return;
         }
         // The seed, and every reconnect's reconcile: adopt what runs,
         // mint what this subscription tracked and the listing says
