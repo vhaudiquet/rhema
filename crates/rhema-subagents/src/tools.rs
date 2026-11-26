@@ -1229,8 +1229,13 @@ impl SubagentTools {
         let minted = registry.mint(&def.name);
         // The hook is read at spawn and held for the job's lifetime: a
         // gate firing after the parent turn's end still consults the
-        // turn's policy, never the fail-safe reject. No hook installed
-        // means the inner tools reject, the fail-safe default.
+        // turn's policy object, never the fail-safe reject. The hook
+        // itself has to be durable, though: a hook whose answer channel
+        // is dropped at the turn's end (the UI bridge is one) reads as
+        // a decline from then on, and a background job outlives the
+        // turn by design. See `rhema-code`'s approval bridge, invariant
+        // 3. No hook installed means the inner tools reject, the
+        // fail-safe default.
         let hook = self.shell.current_approval();
         // A child session is minted before the first model call, so
         // the record and the file cannot disagree about which session

@@ -21,6 +21,13 @@
 //!    hook = one consumer; sequential approvals line up FIFO with the
 //!    answers, so no id matching is needed.
 //!
+//! 3. The answerer outlives every job that inherited a hook from its
+//!    turn. A background subagent captures the hook at spawn and holds
+//!    it for its own lifetime, which is longer than the turn that
+//!    installed it: dropping the answerer at "turn finished" closes the
+//!    channel, and every approval such a job asks for afterwards reads
+//!    as a decline. Keep it in the app, not in the turn.
+//!
 //! Fail-safety: dropping the UI's [`ApprovalAnswerer`] (quit, UI thread
 //! gone) closes the channel; `recv()` then errors and every call declines.
 //! A closed event channel (UI gone before the request was sent) declines
