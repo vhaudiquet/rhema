@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{DEBOUNCE, TTL, config, event, register, setup, setup_with, the_key};
 use rhema_rsd::async_trait;
 use rhema_rsd::{
-    DispatchError, DispatcherConfig, Driver, Handler, IngestResult, KeyState, Outcome, ResourceKey,
-    SessionContext,
+    DispatcherConfig, Driver, Handler, IngestResult, KeyState, Outcome, ResourceKey, SessionContext,
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -548,9 +547,15 @@ async fn a_run_that_outlives_its_lease_fails_loudly_instead_of_releasing() {
     resume.notify_one();
 
     // The final checkpoint is past the TTL: the run must abort with the
-    // dispatcher's expiry, not finalize over a dead lease (RSD §5).
-    let err = runner.await.unwrap().unwrap_err();
-    assert!(matches!(err, DispatchError::Expired(_)));
+    // dispatcher's expiry, not finalize over a dead lease (RSD §5). The
+    // failure lands as this key's outcome, so a sibling's run in the same
+    // pass is not cancelled with it.
+    let outcomes = runner.await.unwrap().unwrap();
+    assert_eq!(outcomes.len(), 1, "one key became a run");
+    let Outcome::Failed(why) = &outcomes[0] else {
+        panic!("a dead lease reads as a failed run, got {:?}", outcomes[0]);
+    };
+    assert!(why.contains("lease expired"), "{why}");
     assert_eq!(
         dispatcher.status(&key).unwrap().state,
         KeyState::Leased,
@@ -697,5 +702,92 @@ async fn a_driver_leaves_the_keys_it_does_not_own_for_the_driver_that_does() {
     assert_eq!(
         status.last_outcome,
         Some(Outcome::Failed("theirs".to_owned()))
+    );
+}
+
+/// A store that refuses every write for keys naming `poison`, so one
+/// key's failure can be told apart from its siblings'.
+struct PoisonedStore {
+    inner: rhema_rsd::VolatileStore,
+    poison: &'static str,
+}
+
+impl rhema_rsd::Store for PoisonedStore {
+    fn load(
+        &self,
+        key: &ResourceKey,
+    ) -> Result<Option<rhema_rsd::KeyRecord>, rhema_rsd::StoreError> {
+        self.inner.load(key)
+    }
+
+    fn save(
+        &self,
+        record: rhema_rsd::KeyRecord,
+        expected_revision: Option<rhema_rsd::Revision>,
+    ) -> Result<(), rhema_rsd::StoreError> {
+        // Ingest writes an idle record; the lease acquisition that turns
+        // it live is where this key's run fails, so the event still lands.
+        if record.key.as_str().contains(self.poison) && record.state == rhema_rsd::KeyState::Leased
+        {
+            return Err(rhema_rsd::StoreError::Backend("poisoned key".into()));
+        }
+        self.inner.save(record, expected_revision)
+    }
+
+    fn delete(&self, key: &ResourceKey) -> Result<bool, rhema_rsd::StoreError> {
+        self.inner.delete(key)
+    }
+
+    fn keys(&self) -> Result<Vec<ResourceKey>, rhema_rsd::StoreError> {
+        self.inner.keys()
+    }
+}
+
+#[tokio::test]
+async fn a_store_error_on_one_key_does_not_cancel_its_siblings() {
+    let clock = Arc::new(rhema_rsd::FixedClock::new(1_000));
+    let dispatcher = Arc::new(rhema_rsd::Dispatcher::new(
+        config(),
+        clock.clone(),
+        Arc::new(PoisonedStore {
+            inner: rhema_rsd::VolatileStore::new(),
+            poison: "poisoned",
+        }),
+    ));
+    register(&dispatcher);
+    for key in ["github:healthy", "github:poisoned"] {
+        dispatcher.ingest(event(key, "e1")).unwrap();
+    }
+    clock.advance(DEBOUNCE);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let driver = Driver::new(
+        dispatcher.clone(),
+        Arc::new(SimpleHandler {
+            report: tx,
+            outcome: Outcome::Handled,
+        }),
+    );
+    let outcomes = driver.run_once().await.unwrap();
+
+    assert_eq!(outcomes.len(), 2, "both keys became runs: {outcomes:?}");
+    assert!(
+        outcomes.contains(&Outcome::Handled),
+        "the healthy key finished: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&Outcome::Failed(
+            "store backend failed: poisoned key".to_owned()
+        )),
+        "the poisoned key fails alone: {outcomes:?}"
+    );
+    assert_eq!(
+        rx.recv().await,
+        Some(1),
+        "the healthy sibling still ran to its first poll"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "only the healthy key reached the handler"
     );
 }

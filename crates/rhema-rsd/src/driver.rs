@@ -155,7 +155,10 @@ impl Driver {
     /// completion, concurrently. One outcome per key that became a run;
     /// a key lost to a race or parked at capacity is simply not in the
     /// list. A handler that panics fails its own run, its lease is left
-    /// for the TTL sweep, which re-dispatches against current state.
+    /// for the TTL sweep, which re-dispatches against current state. A
+    /// store error on one key fails that key's run only: returning early
+    /// here would drop the `JoinSet`, cancelling the siblings mid-handler
+    /// with their leases held.
     pub async fn run_once(&self) -> Result<Vec<Outcome>, DispatchError> {
         let keys = self.dispatcher.admit()?;
         let mut set = JoinSet::new();
@@ -176,7 +179,10 @@ impl Driver {
         let mut outcomes = Vec::new();
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok(run) => outcomes.extend(run?),
+                Ok(Ok(Some(outcome))) => outcomes.push(outcome),
+                // A key lost to a race or parked at capacity never ran.
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => outcomes.push(Outcome::Failed(err.to_string())),
                 Err(joined) => outcomes.push(Outcome::Failed(joined.to_string())),
             }
         }
