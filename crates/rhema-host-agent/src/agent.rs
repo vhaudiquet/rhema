@@ -647,7 +647,10 @@ impl HostAgent {
         }
         let mut step = self.agent.step(&mut self.session, sink, ctx).await?;
         let mut remaining = self.config.max_turn_steps.get() - 1;
-        while step.output.stop_reason == StopReason::ToolUse {
+        // `ran_tools` stops a `ToolUse` stop that assembled no call from
+        // spending every remaining step on it: nothing it asked for is
+        // there to run, and the next request would answer nothing.
+        while step.output.stop_reason == StopReason::ToolUse && step.ran_tools() {
             if remaining == 0 {
                 break;
             }
