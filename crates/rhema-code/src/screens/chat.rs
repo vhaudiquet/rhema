@@ -566,25 +566,16 @@ impl ChatState {
             // The palette owns the vertical arrows while it has rows,
             // commands, models under `/model`, profiles under
             // `/profile`, or the path entries under the cursor's token.
-            KeyCode::Up | KeyCode::Down
-                if !self.input.contains('\n')
-                    && !palette_rows(
-                        &self.input,
-                        self.cursor,
-                        models,
-                        profiles,
-                        sandboxes,
-                        icons,
-                    )
-                    .is_empty() =>
-            {
-                let count =
-                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons)
-                        .len();
-                if key.code == KeyCode::Down {
-                    self.palette_index = (self.palette_index + 1).min(count - 1);
-                } else {
-                    self.palette_index = self.palette_index.saturating_sub(1);
+            // One cached lookup per press: the directory walk behind the
+            // path rows used to run three times per arrow key.
+            KeyCode::Up | KeyCode::Down if !self.input.contains('\n') => {
+                let count = palette_rows_cached(self, models, profiles, sandboxes, icons).len();
+                if count > 0 {
+                    if key.code == KeyCode::Down {
+                        self.palette_index = (self.palette_index + 1).min(count - 1);
+                    } else {
+                        self.palette_index = self.palette_index.saturating_sub(1);
+                    }
                 }
                 ChatAction::None
             }
@@ -598,8 +589,7 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Tab => {
-                let rows =
-                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons);
+                let rows = palette_rows_cached(self, models, profiles, sandboxes, icons);
                 if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
                     match row {
                         PaletteRow::Command(spec) => {
@@ -648,8 +638,7 @@ impl ChatState {
                 // argument row runs the input it completes to; a path
                 // row only splices itself into the prompt. With no row
                 // the key is the ordinary submit.
-                let rows =
-                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons);
+                let rows = palette_rows_cached(self, models, profiles, sandboxes, icons);
                 if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
                     if let Some(text) = completion_input(row) {
                         // A new prompt goes to the live tail; stop
