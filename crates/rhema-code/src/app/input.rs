@@ -843,6 +843,16 @@ impl App {
                     self.transcript
                         .push_notice("the sandbox is being stood up; the prompt waits for it");
                     Vec::new()
+                } else if self.agent.is_none() {
+                    // The step right after onboarding lands here: the
+                    // profile is configured but the agent is not built
+                    // yet. Starting a turn with no agent would leave
+                    // `turn.running` set with no task behind it, spinner
+                    // on and Esc dead; the text stays in the input and
+                    // runs once the backend lands.
+                    self.transcript
+                        .push_notice("the backend is not ready yet; the prompt waits for it");
+                    Vec::new()
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;

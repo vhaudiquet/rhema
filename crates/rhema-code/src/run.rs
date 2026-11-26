@@ -1154,6 +1154,7 @@ fn dispatch(
             spans,
         } => {
             let Some(mut agent) = app.agent.take() else {
+                no_backend(app);
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
@@ -1179,6 +1180,7 @@ fn dispatch(
         }
         Effect::RetryTurn => {
             let Some(mut agent) = app.agent.take() else {
+                no_backend(app);
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
