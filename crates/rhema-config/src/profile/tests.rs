@@ -877,3 +877,36 @@ fn an_old_host_mcp_map_still_loads_and_never_serializes_again() {
     let round = serde_yaml::to_string(&settings).unwrap();
     assert!(!round.contains("mcp_servers"), "{round}");
 }
+
+/// An environment override naming a provider has to reach the profile's
+/// own instance of it: judging by the stored `provider` alone falls
+/// through to whichever instance of that provider sorts first.
+#[test]
+fn the_named_instance_serves_the_override_provider() {
+    let mut profile = Profile {
+        provider: Some("mistral".into()),
+        instance: Some("work-openrouter".into()),
+        ..Profile::default()
+    };
+    for name in ["a-openrouter", "work-openrouter"] {
+        profile.upsert_instance(
+            name,
+            ProviderInstance {
+                provider: "openrouter".into(),
+                api_key: Some(format!("key-{name}")),
+                secret_ref: None,
+                base_url: None,
+                api: None,
+            },
+        );
+    }
+
+    assert_eq!(
+        profile.instance_for_provider("openrouter").unwrap().0,
+        "work-openrouter"
+    );
+    assert_eq!(
+        profile.api_key("openrouter", None).as_deref(),
+        Some("key-work-openrouter")
+    );
+}

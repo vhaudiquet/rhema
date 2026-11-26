@@ -215,12 +215,19 @@ impl Profile {
             .collect()
     }
 
-    /// The instance that serves `provider`: the active one when the
-    /// profile's active instance is of that provider, else the first
-    /// stored instance of it, else `None`.
+    /// The instance that serves `provider`: the profile's named
+    /// instance when it is of that provider, else the first stored
+    /// instance of it, else `None`.
+    ///
+    /// The named instance wins whatever the stored `provider` says,
+    /// because `RHEMA_PROVIDER` can select a provider that instance
+    /// already serves: judging by the stored spelling alone would fall
+    /// through to another instance of the same provider and hand back
+    /// a key the user did not choose.
     pub fn instance_for_provider(&self, provider: &str) -> Option<(&str, &ProviderInstance)> {
-        if self.provider.as_deref() == Some(provider)
-            && let Some((name, instance)) = self.active_instance()
+        if let Some(name) = self.instance.as_deref()
+            && let Some(instance) = self.instances.get(name)
+            && instance.provider == provider
         {
             return Some((name, instance));
         }

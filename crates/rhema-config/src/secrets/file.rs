@@ -170,13 +170,19 @@ impl EncryptedFileSecretStore {
     /// The cross-process lock around a write. The lock file exists only
     /// for the duration of the write; a stale one older than thirty
     /// seconds is removed so a crash cannot wedge the store forever.
+    ///
+    /// The wait is capped at a quarter second: this seam is synchronous,
+    /// so a polling loop cannot yield, and the frontends call `set` from
+    /// async turn setup. A writer that holds the lock longer than that
+    /// (or a runtime whose threads cannot sleep at all) gets the error
+    /// naming the lock path instead of stalling the caller for seconds.
     fn lock(&self) -> Result<LockGuard, SecretError> {
         let path = self.lock_path();
         if let Some(parent) = path.parent() {
             private_dir(parent)
                 .map_err(|err| backend("cannot create the config directory", err))?;
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_millis(250);
         loop {
             match private_create(&path) {
                 Ok(_) => return Ok(LockGuard { path }),

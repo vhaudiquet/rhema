@@ -10,6 +10,10 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
+
+/// Names one process's temp files; see [`private_write_atomic`].
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Creates `path` and its parents, then restricts the leaf directory
 /// to `0700` (best-effort). The parents keep their modes, only the
@@ -43,14 +47,29 @@ pub fn private_write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> io::Resu
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let temp = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.{}.tmp", std::process::id()));
-    let written = private_write(&temp, contents);
-    if written.is_err() {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // The name carries a per-process sequence, and `private_create`
+    // refuses a name that already exists: two threads writing the same
+    // path used to open one temp, truncate each other's bytes, and
+    // rename the mixture over the good file.
+    let (temp, mut file) = loop {
+        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+        match private_create(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    };
+    let written = {
+        use std::io::Write;
+        file.write_all(contents.as_ref())
+            .and_then(|()| file.flush())
+    };
+    drop(file);
+    if let Err(err) = written {
         let _ = std::fs::remove_file(&temp);
-        return written;
+        return Err(err);
     }
     match std::fs::rename(&temp, path) {
         Ok(()) => Ok(()),
@@ -207,6 +226,42 @@ mod tests {
         std::fs::write(&path, b"old").unwrap();
         private_write_atomic(&path, b"new").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "state.json")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// Two threads writing the same path used to share one temp named
+    /// by the pid alone: each truncated the other's bytes and the rename
+    /// committed the mixture.
+    #[test]
+    fn concurrent_atomic_writes_never_interleave() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let payloads: Vec<String> = (0..8u8).map(|n| format!("{n}").repeat(64 * 1024)).collect();
+
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let path = path.clone();
+                std::thread::spawn(move || private_write_atomic(&path, payload.as_bytes()).unwrap())
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let landed = std::fs::read(&path).unwrap();
+        assert!(
+            payloads.iter().any(|payload| payload.as_bytes() == landed),
+            "the file holds one whole payload, {} bytes",
+            landed.len()
+        );
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
