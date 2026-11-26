@@ -62,6 +62,92 @@ pub const VAR_BIN: &str = "RHEMA_VISION_BIN";
 /// `attach` drains.
 pub const VAR_STAGING: &str = "RHEMA_VISION_STAGING";
 
+/// The `see` function's body. It stages through core shell tools, so
+/// no helper binary is needed in the sandbox; the host's `attach`
+/// still consumes the files.
+pub const SHELL_BODY: &str = r#"local staging="${RHEMA_VISION_STAGING:-}"
+if [ -z "$staging" ]; then
+  printf 'see: not wired in this shell (no RHEMA_VISION_STAGING)\n' >&2
+  return 4
+fi
+if ! mkdir -p "$staging" 2>/dev/null; then
+  printf 'see: staging failed: cannot create %s\n' "$staging" >&2
+  return 3
+fi
+local limit=5242880
+local failed=0
+local index=0
+local stdin=0
+local path tmp size magic
+if [ "$#" -eq 0 ]; then
+  stdin=1
+  set -- ""
+fi
+for path in "$@"; do
+  tmp="$staging/$$-$(date +%s)-$RANDOM-$index.img"
+  if [ "$stdin" -eq 1 ]; then
+    if ! head -c $((limit + 1)) > "$tmp"; then
+      rm -f "$tmp"
+      printf 'see: reading stdin failed\n' >&2
+      return 3
+    fi
+  elif ! head -c $((limit + 1)) "$path" > "$tmp"; then
+    rm -f "$tmp"
+    printf 'see: %s: cannot read\n' "$path" >&2
+    failed=$((failed + 1))
+    index=$((index + 1))
+    continue
+  fi
+  size=$(wc -c < "$tmp" | tr -d ' ')
+  if [ "$size" -eq 0 ]; then
+    rm -f "$tmp"
+    if [ "$stdin" -eq 1 ]; then
+      printf 'see: no bytes arrived on stdin\n' >&2
+      return 1
+    fi
+    printf 'see: %s: no bytes arrived\n' "$path" >&2
+    failed=$((failed + 1))
+    index=$((index + 1))
+    continue
+  fi
+  if [ "$size" -gt "$limit" ]; then
+    rm -f "$tmp"
+    if [ "$stdin" -eq 1 ]; then
+      printf 'see: image too large: %s bytes, the limit is %s\n' "$size" "$limit" >&2
+      return 2
+    fi
+    printf 'see: %s: image too large: %s bytes, the limit is %s\n' "$path" "$size" "$limit" >&2
+    failed=$((failed + 1))
+    index=$((index + 1))
+    continue
+  fi
+  magic=$(od -An -tx1 -N12 "$tmp" | tr -d ' \n')
+  case "$magic" in
+    89504e470d0a1a0a*|ffd8ff*|474946383761*|474946383961*|52494646????????57454250*)
+      if [ "$stdin" -eq 1 ]; then
+        printf '[image staged for viewing: %s bytes]\n' "$size"
+      else
+        printf '[image staged for viewing: %s]\n' "$path"
+      fi
+      ;;
+    *)
+      rm -f "$tmp"
+      if [ "$stdin" -eq 1 ]; then
+        printf 'see: not a recognized image (png, jpeg, gif, webp)\n' >&2
+        return 2
+      fi
+      printf 'see: %s: not a recognized image (png, jpeg, gif, webp)\n' "$path" >&2
+      failed=$((failed + 1))
+      ;;
+  esac
+  index=$((index + 1))
+done
+if [ "$failed" -gt 0 ]; then
+  return 2
+fi
+return 0
+"#;
+
 /// The host-side half of a sandbox with no shared staging directory:
 /// after a command, the executor's owner drains the staged files
 /// through the sandbox's own read path. The bytes are already consumed
@@ -116,8 +202,8 @@ pub enum StageError {
 /// deletes the init file and any staged files under it, so the wiring
 /// must outlive every session it feeds.
 pub struct Wiring {
-    /// The env map: `BASH_ENV`, `RHEMA_VISION_BIN`, and
-    /// `RHEMA_VISION_STAGING`. Deliberately no inherited-`BASH_ENV`
+    /// The env map: `BASH_ENV` and `RHEMA_VISION_STAGING`.
+    /// Deliberately no inherited-`BASH_ENV`
     /// entry: the chain is baked into the init file's text, and an env
     /// var here would make an outer generated init re-source itself
     /// until the shell died.
@@ -152,8 +238,7 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
     WIRED
         .get_or_init(|| {
             let dir = crate::init::temp_dir("rhema-vision").ok()?;
-            let bin = std::env::current_exe().ok()?;
-            provision_in_dir(dir, bash_env, &bin, false)
+            provision_in_dir(dir, bash_env, false)
                 .map(Arc::new)
                 .ok()
         })
@@ -169,9 +254,9 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
 ///
 /// Filesystem failures: the dir cannot be created or the init file
 /// cannot be written.
-pub fn provision_with_bin(bash_env: Option<OsString>, bin: &Path) -> std::io::Result<Wiring> {
+pub fn provision_with_bin(bash_env: Option<OsString>, _bin: &Path) -> std::io::Result<Wiring> {
     let dir = crate::init::temp_dir("rhema-vision")?;
-    provision_in_dir(dir, bash_env, bin, true)
+    provision_in_dir(dir, bash_env, true)
 }
 
 /// Provisions the state into `dir`, the shared-root placement: the
@@ -183,8 +268,7 @@ pub fn provision_with_bin(bash_env: Option<OsString>, bin: &Path) -> std::io::Re
 ///
 /// The staging directory cannot be created.
 pub fn provision_shared(dir: PathBuf) -> std::io::Result<Wiring> {
-    let bin = std::env::current_exe()?;
-    provision_in_dir(dir, None, &bin, false)
+    provision_in_dir(dir, None, false)
 }
 
 /// The state provision; `write_init` is this module's test seam (see
@@ -192,20 +276,18 @@ pub fn provision_shared(dir: PathBuf) -> std::io::Result<Wiring> {
 fn provision_in_dir(
     dir: PathBuf,
     bash_env: Option<OsString>,
-    bin: &Path,
     write_init: bool,
 ) -> std::io::Result<Wiring> {
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging)?;
     let (init_path, mut shell_env) = if write_init {
-        let body = crate::init::function(NAME, VAR_BIN, MODE);
+        let body = format!("{NAME}() {{\n{SHELL_BODY}\n}}\n");
         let path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;
         let env = crate::init::env_with(&path);
         (path, env)
     } else {
         (dir.join("init.bash"), std::collections::BTreeMap::new())
     };
-    shell_env.insert(VAR_BIN.to_owned(), bin.display().to_string());
     shell_env.insert(VAR_STAGING.to_owned(), staging.display().to_string());
 
     Ok(Wiring {
@@ -497,12 +579,9 @@ mod tests {
             text.contains("source '/user/init.bash' || true\n"),
             "{text}"
         );
-        assert!(
-            text.contains(&format!(
-                "{NAME}() {{ \"$RHEMA_VISION_BIN\" {MODE} \"$@\"; }}"
-            )),
-            "{text}"
-        );
+        assert!(text.contains(&format!("{NAME}() {{")), "{text}");
+        assert!(text.contains("RHEMA_VISION_STAGING"), "{text}");
+        assert!(text.contains("not a recognized image"), "{text}");
         // The chain rides the file text, never the env map: an env var
         // reaches every generated init in a chain and an outer one
         // re-sources itself until the shell dies.
@@ -524,9 +603,56 @@ mod tests {
         // No predecessor, no guard line at all.
         let bare = provision_with_bin(None, Path::new("/usr/local/bin/rhema")).unwrap();
         let text = std::fs::read_to_string(&bare.init_path).unwrap();
-        assert_eq!(
-            text,
-            "# generated by rhema-bash; do not edit\nsee() { \"$RHEMA_VISION_BIN\" __vision \"$@\"; }\n"
+        assert!(
+            text.starts_with("# generated by rhema-bash; do not edit\nsee() {\n"),
+            "{text}"
+        );
+        assert!(!text.contains("source '"), "{text}");
+    }
+
+    #[test]
+    fn the_shell_macro_stages_a_file_and_refuses_bad_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiring = provision_with_bin(None, Path::new("/usr/local/bin/rhema")).unwrap();
+        let staging = wiring.shell_env.get(VAR_STAGING).unwrap();
+        let image = dir.path().join("a.png");
+        std::fs::write(&image, png_bytes()).unwrap();
+        let run = |body: &str, image: Option<&Path>| {
+            let mut command = std::process::Command::new("bash");
+            command
+                .arg("-c")
+                .arg(body)
+                .env("BASH_ENV", &wiring.init_path)
+                .env(VAR_STAGING, staging);
+            if let Some(image) = image {
+                command.env("RHEMA_TEST_IMAGE", image);
+            }
+            command.output().unwrap()
+        };
+        let out = run("see \"$RHEMA_TEST_IMAGE\"", Some(&image));
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("image staged for viewing"),
+            "{out:?}"
+        );
+        let staged: Vec<_> = std::fs::read_dir(staging).unwrap().flatten().collect();
+        assert_eq!(staged.len(), 1, "{staged:?}");
+        assert_eq!(std::fs::read(staged[0].path()).unwrap(), png_bytes());
+
+        let text = dir.path().join("a.txt");
+        std::fs::write(&text, b"not an image").unwrap();
+        let out = run("see \"$RHEMA_TEST_IMAGE\"", Some(&text));
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not a recognized image"),
+            "{out:?}"
+        );
+
+        let out = run("see < \"$RHEMA_TEST_IMAGE\"", Some(&image));
+        assert!(out.status.success(), "stdin: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("image staged for viewing"),
+            "{out:?}"
         );
     }
 

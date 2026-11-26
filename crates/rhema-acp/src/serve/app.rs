@@ -303,15 +303,15 @@ impl App {
                 .collect();
             let kit = rhema_bash::runtime::Kit::new(
                 rhema_bash::runtime::Feature::Vision,
-                vec![
-                    rhema_bash::runtime::Stub::new(
-                        rhema_bash::vision::NAME,
-                        rhema_bash::vision::VAR_BIN,
-                        vec![rhema_bash::vision::MODE.to_owned()],
-                    )
-                    .expect("the vision stub is a valid bash identifier"),
-                ],
-                rhema_bash::runtime::Needs::MACRO,
+                Vec::new(),
+                rhema_bash::runtime::Needs::SHELL_STATE,
+            )
+            .with_shell(
+                rhema_bash::runtime::Shell::new(
+                    rhema_bash::vision::NAME,
+                    rhema_bash::vision::SHELL_BODY,
+                )
+                .expect("the vision macro is valid shell"),
             )
             .with_vars(vars);
             if let Some(placed) = self.kits.place(&[kit], inherited.as_deref()) {

@@ -40,7 +40,8 @@ pub use setup::{
     AppSetup, Backend, Candidate, Effect, OnboardingHit, RunOptions, Screen, SettingsHit,
 };
 pub(crate) use setup::{
-    NO_PROVIDER_HELP, builtin_stub, context_tokens, kit_for, startup_profile, startup_sandbox,
+    NO_PROVIDER_HELP, builtin_stub, context_tokens, kit_for, kit_for_shell, startup_profile,
+    startup_sandbox, vision_shell,
 };
 use setup::{
     estimate_history_tokens, profile_sandbox, session_agent_config, shadow_builtin, skill_rows,

@@ -1,6 +1,8 @@
 # rhema-runtime-kit, what a generated bash function needs and how it crosses a sandbox
 
 > **Status:** v1 implemented for jobs, vision, search, and decide.
+> `see` is a shell macro with no helper binary; the other four still
+> run the installed helper.
 > MCP is no longer a kit: `mcp-cli` runs inside the sandbox and reads
 > its own config there. The bridge and socket sections below describe
 > the earlier host-side design and are kept as history.
@@ -16,9 +18,10 @@
 ## 0. Scope
 
 Four features reach the model through the same mechanism: a function
-defined in a `BASH_ENV` init file, exec'ing the rhema binary in a hidden
-mode. They are `job`, `see`, `search`, and `decide`; `mcp` moved to
-its own CLI. Each one is placed wherever the session's bash runs.
+defined in a `BASH_ENV` init file. `job`, `search`, and `decide` exec
+the rhema binary in a hidden mode; `see` is shell text that stages an
+image with the core utilities. `mcp` moved to its own CLI. Each one is
+placed wherever the session's bash runs.
 
 **In scope:** one kit description shared by the four; placement into a
 local temp dir, a backend-shared dir, or a sandbox-side cache;
@@ -66,11 +69,12 @@ A kit is a pure description, no filesystem work:
 
 ```rust
 pub struct Kit {
-    /// `jobs`, `vision`, `search`, `decision`, `mcp`.
+    /// `jobs`, `vision`, `search`, `decision`.
     pub feature: Feature,
-    /// The stubs this feature adds: one for a macro, one per configured
-    /// MCP server.
+    /// The stubs this feature adds: one for a helper-backed macro.
     pub stubs: Vec<Stub>,
+    /// The shell macros this feature adds: `see`.
+    pub shells: Vec<Shell>,
     /// Env entries besides `BASH_ENV` and the bin var (token, profile,
     /// media dir, staging dir, session file).
     pub vars: BTreeMap<String, String>,
@@ -79,28 +83,32 @@ pub struct Kit {
 }
 ```
 
-The wiring owns the stubs and the variables. The kit owns the four
-things where a mistake is a reviewed failure:
+The wiring owns the stubs, shells, and variables. The kit owns the
+four things where a mistake is a reviewed failure:
 
 1. **Layout.** Where the directory is and what it is called.
-2. **Executable.** Which binary the stubs name and how it got there.
-3. **Init.** The generated file, its stub set, and its mode.
-4. **Env.** `BASH_ENV` and the bin variable, in sandbox coordinates.
+2. **Executable.** Which binary the stubs name, if any, and how it got
+   there.
+3. **Init.** The generated file, its function set, and its mode.
+4. **Env.** `BASH_ENV`, and the bin variable when a stub needs one, in
+   sandbox coordinates.
 
-`rhema_bash::init` already generates the stub text and the env map. The
-installed helper exposes that generator as `__init`, so the sandbox
-writes its own file (§3.3). The placement that talks to a sandbox lives
-in `rhema-sandbox::kit` (§12.1), because every frontend already depends
-on that crate and `rhema-sandbox` depends on `rhema-bash`, never the
+`rhema_bash::runtime::init_text` generates the function text and the
+placement writes it. A shared root lets the host write the file
+directly; a sandbox with no shared root uploads the same text. The
+`__init` mode remains on the helper as a diagnostic, not as the
+placement path. The placement that talks to a sandbox lives in
+`rhema-sandbox::kit` (§12.1), because every frontend already depends on
+that crate and `rhema-sandbox` depends on `rhema-bash`, never the
 reverse.
 
 ## 3. Placement
 
-A `Kit` is placed, not written. The placer does three things: ensure
-the runtime root (or a sandbox-side cache when there is no shared root),
-install the helper (§7), and generate the init file with it (§3.3). The
-host writes no file of its own, so there is no staging directory and no
-upload of an init.
+A `Kit` is placed. The placer ensures the runtime root (or a
+sandbox-side cache when there is no shared root), installs the helper
+when a kit needs one (§7), and writes the init file (§3.3). A shared
+root gets the file from the host; a sandbox with no shared root receives
+the same text through its file route.
 
 ### 3.1 The runtime root
 
@@ -157,7 +165,6 @@ when it is shared; without a root the tree is the sandbox's own (§3.2).
 <runtime-root>/               # shared, when the backend mounts one
   bin/<version>/              # installed by the sandbox, not copied from the host
     rhema                     # plus gob, which jobs needs
-    init-<kit>.sh             # generated once, static per stub set
   mcp/<session-key>/
     mcp.sock
   sessions/<session-key>/
@@ -186,23 +193,21 @@ the fallback layout is the same tree under `<workspace>/.rhema/runtime`.
 
 ### 3.3 The init file
 
-The features do not chain files. The installed helper generates one
-file per `KIT_VERSION` and stub set:
+The features do not chain files. The placement writes one file per
+session's kit set:
 
-    <install>/init-<kit>.sh
+    <session>/init.sh
 
-The host runs `<helper> __init ... > path` once, after install, and
-sets `BASH_ENV` to it. Every session uses the same file: the function
-bodies are already static (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`),
-and the values that differ per session (bin, token, staging, jobs
-session, media) are env entries. A feature whose env is absent exits
-with "not available in this session".
+The function bodies are static. A helper stub is
+`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`; a shell macro carries its
+body verbatim, so `see` names no binary. The values that differ per
+session (bin, token, staging, jobs session, media) are env entries. A
+feature whose env is absent exits with "not available in this session".
 
-The file is not uploaded and is not in a shared root; it lives beside
-the installed helper, so a sandbox with no shared root still has it.
-One exception: the MCP stubs are one function per configured server,
-so the stub set, not the session, picks the file. Sessions with the
-same servers share it.
+Under a shared root the host writes the file directly. A sandbox with
+no shared root gets the same text through `write_file`, once per kit
+set. The `__init` helper mode is still available for a manual
+diagnosis; it is no longer how a placement makes the file.
 
 ### 3.4 Cleanup
 
@@ -391,7 +396,7 @@ same way.
 | feature | helper | shared state | bridge | secrets | note |
 |---|---|---|---|---|---|
 | jobs | yes | yes: the jobs dir, or a pull | no | no | `gob` comes with the install |
-| vision | yes | yes: the staging dir, or a pull | no | no | fs-disjoint pulls the staged files |
+| vision | no | yes: the staging dir, or a pull | no | no | shell macro; fs-disjoint pulls the staged files |
 | search | yes | no | no | yes: injected | the host resolves the chain, the sandbox gets it in env |
 | decide | yes | no | no | yes: injected | same, one active instance |
 | mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |

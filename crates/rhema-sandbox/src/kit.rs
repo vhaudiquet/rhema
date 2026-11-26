@@ -318,28 +318,23 @@ pub async fn ensure_shared(
     let helper = sandbox_install.join("rhema");
     let init = session_dir.join("init.sh");
     let sandbox_init = sandbox_session.join("init.sh");
-    let mut command = format!("{} __init", shquote(&helper.to_string_lossy()));
-    for kit in &decided {
-        for stub in &kit.stubs {
-            command.push_str(&format!(" --stub {}", shquote(&stub.flag())));
-        }
-    }
-    command.push_str(&format!(" > {}", shquote(&sandbox_init.to_string_lossy())));
-    run_command(sandbox, command, "the init generator").await?;
-
     let helper = helper.to_string_lossy().into_owned();
     let helper_dir = Path::new(&helper)
         .parent()
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // A shared root gives the host the generated file. A test
-    // sandbox may answer without writing it; then there is nothing
-    // to prepend and the env still names the helper directly.
-    if let Ok(text) = std::fs::read_to_string(&init) {
-        std::fs::write(
-            &init,
-            format!("export PATH={}:\"$PATH\"\n{text}", shquote(&helper_dir)),
-        )?;
+    // The shared root lets the host write the init file directly. The
+    // shell macros are in it now, so there is no reason to round-trip
+    // through the helper for a file the host already has.
+    let text = rhema_bash::runtime::init_text(&decided);
+    std::fs::write(
+        &init,
+        format!("export PATH={}:\"$PATH\"\n{text}", shquote(&helper_dir)),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o600))?;
     }
     let mut env = BTreeMap::new();
     env.insert(
@@ -755,7 +750,7 @@ fn shquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhema_bash::runtime::{Feature, Stub};
+    use rhema_bash::runtime::{Feature, Shell, Stub};
 
     fn kit(feature: Feature, needs: Needs) -> Kit {
         Kit::new(feature, Vec::new(), needs)
@@ -949,7 +944,9 @@ mod tests {
                 code,
             }));
         }
-        let kit = kit(Feature::Vision, Needs::MACRO);
+        let kit = Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE).with_shell(
+            Shell::new("see", "printf '%s\\n' staged").expect("a shell macro"),
+        );
         let placed = place_sandbox(&sandbox, "/workspace", std::slice::from_ref(&kit))
             .await
             .expect("vision places without gob");
@@ -964,7 +961,7 @@ mod tests {
         let decisions = decide_all(
             &[
                 kit(Feature::Jobs, Needs::MACRO),
-                kit(Feature::Vision, Needs::MACRO),
+                kit(Feature::Vision, Needs::SHELL_STATE),
                 kit(Feature::Search, Needs::HOST_CALL),
             ],
             &caps,
@@ -1013,11 +1010,6 @@ mod tests {
                 stderr: Vec::new(),
                 code: Some(0),
             },
-            crate::RunOutcome {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                code: Some(0),
-            },
         ] {
             sandbox.push_run(Ok(outcome));
         }
@@ -1044,10 +1036,12 @@ mod tests {
                 .is_file()
         );
         let commands = sandbox.executed();
+        assert_eq!(commands.len(), 2, "{commands:?}");
         assert!(commands[0].contains("install-rhema"), "{commands:?}");
         assert!(commands[1].contains("__kit-version"), "{commands:?}");
-        assert!(commands[2].contains("__init"), "{commands:?}");
-        assert!(commands[2].contains("--stub"), "{commands:?}");
+        let init = std::fs::read_to_string(&placed.init).unwrap();
+        assert!(init.contains("job() {"), "{init}");
+        assert!(init.contains("export PATH="), "{init}");
         let session = placed.session.path().to_path_buf();
         assert!(session.join("jobs/session").is_file());
         drop(placed);

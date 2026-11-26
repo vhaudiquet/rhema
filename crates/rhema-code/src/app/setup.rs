@@ -4,7 +4,7 @@
 //! agent builds read.
 
 use super::*;
-use rhema_bash::runtime::{Feature, Kit, Needs, Stub};
+use rhema_bash::runtime::{Feature, Kit, Needs, Shell, Stub};
 use rhema_provider_registry::build;
 
 /// Everything the runner fixed before the app started: flags, store,
@@ -1155,15 +1155,11 @@ pub(crate) fn session_agent_config(
             .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
     if let Some((env, section)) = vision {
-        kits.push(kit_for(
+        kits.push(kit_for_shell(
             Feature::Vision,
             env,
-            vec![builtin_stub(
-                rhema_bash::vision::NAME,
-                rhema_bash::vision::VAR_BIN,
-                vec![rhema_bash::vision::MODE],
-            )],
-            Needs::MACRO,
+            vision_shell(),
+            Needs::SHELL_STATE,
         ));
         sections.insert(Feature::Vision, section);
     }
@@ -1328,6 +1324,25 @@ pub(crate) fn kit_for(
         .filter(|(name, _)| name != "BASH_ENV" && name != "RHEMA_INHERITED_BASH_ENV")
         .collect();
     Kit::new(feature, stubs, needs).with_vars(vars)
+}
+
+/// The same kit with one shell macro and no helper stub.
+pub(crate) fn kit_for_shell(
+    feature: Feature,
+    env: std::collections::BTreeMap<String, String>,
+    shell: Shell,
+    needs: Needs,
+) -> Kit {
+    kit_for(feature, env, Vec::new(), needs).with_shell(shell)
+}
+
+/// The `see` macro, the one kit whose body is shell text.
+pub(crate) fn vision_shell() -> Shell {
+    Shell::new(
+        rhema_bash::vision::NAME,
+        rhema_bash::vision::SHELL_BODY,
+    )
+    .expect("the vision macro is valid shell")
 }
 
 /// The prompt's two optional sections, through the one gate the

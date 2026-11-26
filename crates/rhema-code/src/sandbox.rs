@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rhema_bash::ShellTools;
-use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs, Stub};
+use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs, Shell, Stub};
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_host_agent::HostAgentConfig;
@@ -480,10 +480,12 @@ fn sandbox_stub_kits() -> Vec<Kit> {
             vec![stub("job", "RHEMA_JOBS_BIN", rhema_bash::jobs::MODE)],
             Needs::MACRO,
         ),
-        Kit::new(
-            Feature::Vision,
-            vec![stub("see", "RHEMA_VISION_BIN", rhema_bash::vision::MODE)],
-            Needs::MACRO,
+        Kit::new(Feature::Vision, Vec::new(), Needs::SHELL_STATE).with_shell(
+            Shell::new(
+                rhema_bash::vision::NAME,
+                rhema_bash::vision::SHELL_BODY,
+            )
+            .expect("the built-in vision macro is valid shell"),
         ),
         Kit::new(
             Feature::Search,

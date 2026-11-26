@@ -300,15 +300,11 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             .map(|wiring| (wiring.shell_env.clone(), wiring.section))
     };
     if let Some((env, section)) = vision {
-        kits.push(crate::app::kit_for(
+        kits.push(crate::app::kit_for_shell(
             rhema_bash::runtime::Feature::Vision,
             env,
-            vec![crate::app::builtin_stub(
-                rhema_bash::vision::NAME,
-                rhema_bash::vision::VAR_BIN,
-                vec![rhema_bash::vision::MODE],
-            )],
-            rhema_bash::runtime::Needs::MACRO,
+            crate::app::vision_shell(),
+            rhema_bash::runtime::Needs::SHELL_STATE,
         ));
         sections.insert(rhema_bash::runtime::Feature::Vision, section);
     }

@@ -730,8 +730,11 @@ fn a_remote_kit_env_names_the_helper_and_the_session_state() {
     jobs.vars.insert("RHEMA_SESSION".into(), "tag".into());
     let vision = rhema_bash::runtime::Kit::new(
         rhema_bash::runtime::Feature::Vision,
-        vec![stub("see", "RHEMA_VISION_BIN", "__vision")],
-        rhema_bash::runtime::Needs::MACRO,
+        Vec::new(),
+        rhema_bash::runtime::Needs::SHELL_STATE,
+    )
+    .with_shell(
+        rhema_bash::runtime::Shell::new("see", "printf '%s\\n' staged").unwrap(),
     );
     let env = remote_kit_env(&remote, "k1", true, true, &[jobs, vision]);
     assert_eq!(
@@ -742,9 +745,9 @@ fn a_remote_kit_env_names_the_helper_and_the_session_state() {
         env.get("RHEMA_JOBS_BIN").map(String::as_str),
         Some("/home/u/.cache/rhema/kit/3/rhema")
     );
-    assert_eq!(
-        env.get("RHEMA_VISION_BIN").map(String::as_str),
-        Some("/home/u/.cache/rhema/kit/3/rhema")
+    assert!(
+        !env.contains_key("RHEMA_VISION_BIN"),
+        "the vision macro is shell, not a helper call"
     );
     assert_eq!(
         env.get("RHEMA_JOBS_SESSION").map(String::as_str),

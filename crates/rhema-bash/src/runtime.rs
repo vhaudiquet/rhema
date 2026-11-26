@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 /// The kit contract's version: the init file shape and the helper's
 /// modes. Bumped when either changes, so an installed helper from an
 /// older contract is replaced instead of silently missing a mode.
-pub const KIT_VERSION: u32 = 3;
+pub const KIT_VERSION: u32 = 4;
 
 /// The generated surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,10 +53,16 @@ pub struct Needs {
 }
 
 impl Needs {
-    /// A macro over the helper and its per-session state: jobs and
-    /// vision.
+    /// A macro over the helper and its per-session state: jobs.
     pub const MACRO: Self = Self {
         exec: true,
+        shared_state: true,
+        secrets: false,
+    };
+    /// A shell macro over per-session state: vision. No helper, but
+    /// the host still has to read the staged files.
+    pub const SHELL_STATE: Self = Self {
+        exec: false,
         shared_state: true,
         secrets: false,
     };
@@ -163,15 +169,62 @@ impl Stub {
     }
 }
 
+/// A bash function the init file defines directly, with no helper
+/// binary behind it. The body is shell this crate owns; `see` is the
+/// first one, a staging function small enough that a binary only
+/// added a mode and a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shell {
+    /// The function name, a bash identifier.
+    pub name: String,
+    /// The statements between the function's braces.
+    pub body: String,
+}
+
+impl Shell {
+    /// Builds a shell macro, checking the name and that the body is
+    /// not empty.
+    pub fn new(name: impl Into<String>, body: impl Into<String>) -> Result<Self, String> {
+        let shell = Self {
+            name: name.into(),
+            body: body.into(),
+        };
+        if !identifier(&shell.name) {
+            return Err(format!(
+                "shell macro name `{}` is not a bash identifier",
+                shell.name
+            ));
+        }
+        if shell.body.trim().is_empty() {
+            return Err(format!("shell macro `{}` has an empty body", shell.name));
+        }
+        Ok(shell)
+    }
+
+    /// The function definition: the body wrapped in a bash function.
+    pub fn line(&self) -> String {
+        format!(
+            "{name}() {{
+{body}
+}}
+",
+            name = self.name,
+            body = self.body.trim_matches('\n')
+        )
+    }
+}
+
 /// One feature's description, no filesystem work. The wiring owns the
-/// stubs and the vars; the kit owns the shape a reviewed placement
+/// stubs, shells, and vars; the kit owns the shape a reviewed placement
 /// has to honor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kit {
     /// Which surface this kit generates.
     pub feature: Feature,
-    /// The functions the file defines.
+    /// The functions the file defines over a helper binary.
     pub stubs: Vec<Stub>,
+    /// The functions the file defines as shell text.
+    pub shells: Vec<Shell>,
     /// Env entries beside `BASH_ENV` (token, profile, staging, ...).
     pub vars: BTreeMap<String, String>,
     /// What placement must supply for the kit to work.
@@ -184,9 +237,16 @@ impl Kit {
         Self {
             feature,
             stubs,
+            shells: Vec::new(),
             vars: BTreeMap::new(),
             needs,
         }
+    }
+
+    /// Adds a shell macro to the kit.
+    pub fn with_shell(mut self, shell: Shell) -> Self {
+        self.shells.push(shell);
+        self
     }
 
     /// The env entries beside `BASH_ENV`.
@@ -218,6 +278,9 @@ pub fn stubs_text(stubs: &[Stub]) -> String {
 pub fn init_text(kits: &[Kit]) -> String {
     let mut text = header();
     for kit in kits {
+        for shell in &kit.shells {
+            text.push_str(&shell.line());
+        }
         for stub in &kit.stubs {
             text.push_str(&stub.line());
         }
@@ -267,6 +330,21 @@ mod tests {
         .unwrap();
         let line = stub.line();
         assert!(line.contains("'__server' 'a'\\''b'"), "{line}");
+    }
+
+    #[test]
+    fn a_shell_macro_is_a_function_with_its_body() {
+        let shell = Shell::new("see", "printf '%s\\n' ok").unwrap();
+        let line = shell.line();
+        assert!(line.starts_with("see() {\n"), "{line}");
+        assert!(line.contains("printf '%s\\n' ok"), "{line}");
+        assert!(line.ends_with("}\n"), "{line}");
+    }
+
+    #[test]
+    fn a_shell_macro_rejects_an_empty_body_or_bad_name() {
+        assert!(Shell::new("see", "").is_err());
+        assert!(Shell::new("rm -rf", "true").is_err());
     }
 
     #[test]

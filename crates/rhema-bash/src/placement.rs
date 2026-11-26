@@ -93,6 +93,10 @@ fn key(kits: &[Kit], inherited: Option<&OsStr>) -> u64 {
     let mut hasher = DefaultHasher::new();
     for kit in kits {
         kit.feature.name().hash(&mut hasher);
+        for shell in &kit.shells {
+            shell.name.hash(&mut hasher);
+            shell.body.hash(&mut hasher);
+        }
         for stub in &kit.stubs {
             stub.name.hash(&mut hasher);
             stub.bin_var.hash(&mut hasher);
