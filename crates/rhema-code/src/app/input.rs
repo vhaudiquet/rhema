@@ -34,6 +34,23 @@ impl App {
         self.transcript.push_notice(text);
     }
 
+    /// Whether an open dialog owns the ctrl-v paste right now: the
+    /// dialog family with a text line, the same set [`Self::on_paste`]
+    /// feeds.
+    pub(crate) fn dialog_takes_paste(&self) -> bool {
+        match &self.screen {
+            Screen::Settings(settings) => {
+                settings.dialog.is_some()
+                    || settings.add_profile.is_some()
+                    || settings.mcp_dialog.is_some()
+                    || settings.websearch_dialog.is_some()
+                    || settings.decision_dialog.is_some()
+            }
+            Screen::Onboarding(wizard) => wizard.dialog.is_some(),
+            _ => false,
+        }
+    }
+
     /// A bracketed paste landed: into the input, newlines included,
     /// pasting multi-line text must not fire submits. The add-instance
     /// dialog's credential line takes its own, single-line shape. A
@@ -322,6 +339,17 @@ impl App {
         {
             self.should_quit = true;
             return Vec::new();
+        }
+        // Ctrl-v on a dialog's text line reads the clipboard off the key
+        // handler, the road the chat's paste key takes: the synchronous
+        // read stalls the draw loop while the connection round trip runs,
+        // and over ssh it can run for seconds.
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && self.dialog_takes_paste()
+        {
+            return vec![Effect::GrabClipboard];
         }
         // The Models page asks for its catalog the moment it comes up:
         // the section is read before the key moves it, because the key

@@ -43,11 +43,20 @@ impl App {
                 Vec::new()
             }
             UiEvent::ClipboardGrabbed { grab } => {
-                // The read ran off the key handler; the grab routes
-                // the same way the synchronous one did, the chat
-                // screen has no notice channel of its own.
-                if let ChatAction::Notice { text } = self.chat.paste_grab(grab) {
-                    self.push_notice(&text);
+                // The read ran off the key handler. A dialog that asked
+                // for the paste takes the text on its own line, one
+                // control characters filtered out; the chat takes the
+                // rest, images included. The chat has no notice channel
+                // of its own, so its answer lands here.
+                match grab {
+                    crate::screens::clipboard::Grab::Text(text) if self.dialog_takes_paste() => {
+                        self.on_paste(&text);
+                    }
+                    grab => {
+                        if let ChatAction::Notice { text } = self.chat.paste_grab(grab) {
+                            self.push_notice(&text);
+                        }
+                    }
                 }
                 Vec::new()
             }

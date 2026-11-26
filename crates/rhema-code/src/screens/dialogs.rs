@@ -413,21 +413,10 @@ impl AddInstanceDialog {
 
     /// Handles one keypress.
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogAction {
-        // ctrl-v and ctrl-shift-v are paste in terminals that leave them
-        // unbound: the key reads the clipboard, carrying the text a
-        // bracketed paste would have. Only on the text lines.
-        if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                self.stage,
-                DialogStage::NameInstance | DialogStage::EnterCredential
-            )
-        {
-            if let Some(text) = super::clipboard::read() {
-                self.paste(&text);
-            }
-            return DialogAction::None;
-        }
+        // ctrl-v never reaches this dialog: the app reads the clipboard
+        // off the key handler and lands the text through `paste`, the
+        // same road a bracketed paste takes. A synchronous read here ran
+        // the connection round trip on the thread that draws the frame.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return DialogAction::None;
         }
@@ -763,16 +752,10 @@ impl AddProfileDialog {
     }
 
     /// Handles one keypress. Printable keys and backspace edit, enter
-    /// submits a fresh non-blank name, esc closes; ctrl-v (ctrl-shift-v
-    /// included) reads the clipboard, like the add-instance dialog's
-    /// inputs.
+    /// submits a fresh non-blank name, esc closes. ctrl-v is the app's:
+    /// it reads the clipboard off the key handler and lands the text
+    /// through `paste`, like the add-instance dialog's line.
     pub fn handle_key(&mut self, key: KeyEvent) -> ProfileDialogAction {
-        if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(text) = super::clipboard::read() {
-                self.paste(&text);
-            }
-            return ProfileDialogAction::None;
-        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ProfileDialogAction::None;
         }

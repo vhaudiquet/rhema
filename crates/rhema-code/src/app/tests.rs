@@ -9616,3 +9616,48 @@ fn removing_the_default_decision_model_clears_it_and_its_store_entry() {
     };
     assert_eq!(settings.decision.len(), 1, "the add row alone");
 }
+
+/// ctrl-v in a dialog is the app's paste key, not a synchronous
+/// clipboard read on the thread that draws the frame: the key asks, and
+/// the grab lands on the dialog's line.
+#[test]
+fn a_dialog_paste_reads_off_the_key_handler() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .open_settings_at(crate::screens::SettingsSection::Profiles);
+    let Screen::Settings(settings) = &mut h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    settings.add_profile = Some(crate::screens::AddProfileDialog::new(&Default::default()));
+
+    assert_eq!(h.app.on_key(ctrl('v')), vec![Effect::GrabClipboard]);
+
+    h.app.on_event(UiEvent::ClipboardGrabbed {
+        grab: crate::screens::clipboard::Grab::Text("from the clipboard".to_owned()),
+    });
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    let dialog = settings
+        .add_profile
+        .as_ref()
+        .expect("the dialog stays open");
+    assert_eq!(dialog.input, "from the clipboard");
+    assert!(h.app.chat.input.is_empty(), "the chat box never sees it");
+}
+
+/// With no dialog open the same key still feeds the chat.
+#[test]
+fn a_paste_with_no_dialog_still_reaches_the_chat() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .open_settings_at(crate::screens::SettingsSection::Profiles);
+
+    // No dialog: the settings screen's own key handling gets ctrl-v and
+    // ignores it, and a stray grab lands in the chat box as it always
+    // did.
+    h.app.on_event(UiEvent::ClipboardGrabbed {
+        grab: crate::screens::clipboard::Grab::Text("to the chat".to_owned()),
+    });
+    assert_eq!(h.app.chat.input, "to the chat");
+}
