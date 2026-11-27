@@ -488,10 +488,14 @@ pub struct StreamEvent {
     /// Token accounting, on `message_delta`.
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// The Copilot proxy's own bill for the call. Other endpoints omit
+    /// it.
+    #[serde(default)]
+    pub copilot_usage: Option<WireCopilotUsage>,
 }
 
 /// The `message` object of a `message_start` event.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct WireStartMessage {
     /// The message's provider id.
     #[serde(default)]
@@ -499,6 +503,9 @@ pub struct WireStartMessage {
     /// Prompt-to-first-token accounting.
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// The Copilot proxy's own bill, when it rides the message header.
+    #[serde(default)]
+    pub copilot_usage: Option<WireCopilotUsage>,
 }
 
 /// The `content_block` object of a `content_block_start` event.
@@ -545,10 +552,31 @@ pub struct WireDelta {
     pub stop_reason: Option<String>,
 }
 
+/// The `copilot_usage` object the Copilot proxy adds to a response.
+/// The official CLI bills from it, so its `total_nano_aiu` is the
+/// authoritative cost of the call.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct WireCopilotUsage {
+    /// The call's cost in nano-AI units. One US dollar is 100 billion
+    /// nano-AI units.
+    #[serde(default, alias = "totalNanoAiu")]
+    pub total_nano_aiu: Option<f64>,
+}
+
+impl WireCopilotUsage {
+    /// The billed amount in US dollars, when the field is present and
+    /// finite. Zero is a real answer (a free call), not absence.
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.total_nano_aiu
+            .filter(|nano| nano.is_finite() && *nano >= 0.0)
+            .map(|nano| nano / 100_000_000_000.0)
+    }
+}
+
 /// A wire usage object. Each frame carries only its own accounting: the
 /// `message_start` one the input count, the `message_delta` one the final
 /// output count; either may add the cache numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct WireUsage {
     /// Prompt tokens billed.
     #[serde(default)]
@@ -563,6 +591,10 @@ pub struct WireUsage {
     /// write rate, near the full input price).
     #[serde(default)]
     pub cache_creation_input_tokens: Option<u32>,
+    /// The Copilot proxy's own bill, when it nests it in the usage
+    /// object.
+    #[serde(default)]
+    pub copilot_usage: Option<WireCopilotUsage>,
 }
 
 /// The `error` object of an `error` event, or of a non-2xx response body:
@@ -1111,6 +1143,23 @@ impl ChunkAssembler {
                 status: None,
             });
         }
+        // The Copilot proxy may put its bill on the event, on the
+        // message header, or inside a usage object; read all three.
+        if let Some(cost) = event
+            .copilot_usage
+            .as_ref()
+            .and_then(WireCopilotUsage::cost_usd)
+        {
+            self.usage.cost_usd = Some(cost);
+        }
+        if let Some(cost) = event
+            .message
+            .as_ref()
+            .and_then(|message| message.copilot_usage.as_ref())
+            .and_then(WireCopilotUsage::cost_usd)
+        {
+            self.usage.cost_usd = Some(cost);
+        }
         // `message_start` nests its usage under the message header,
         // `message_delta` carries it top-level.
         let mut usage_frame = false;
@@ -1377,6 +1426,13 @@ struct InputComponents {
 /// Merges one wire usage frame into the running tally; a field the
 /// frame leaves out keeps the value a previous frame set.
 fn merge_usage(usage: &mut Usage, inputs: &mut InputComponents, wire: &WireUsage) {
+    if let Some(cost) = wire
+        .copilot_usage
+        .as_ref()
+        .and_then(WireCopilotUsage::cost_usd)
+    {
+        usage.cost_usd = Some(cost);
+    }
     if let Some(input) = wire.input_tokens {
         inputs.input_tokens = input;
     }
@@ -2173,6 +2229,45 @@ mod tests {
     }
 
     #[test]
+    fn copilot_usage_on_the_message_header_sets_the_cost() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            concat!(
+                r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10},"#,
+                r#""copilot_usage":{"total_nano_aiu":2000000000}}}"#
+            ),
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        assert_eq!(out.usage.input_tokens, 10);
+        assert_eq!(out.usage.output_tokens, 2);
+        let cost = out.usage.cost_usd.expect("the proxy's bill is kept");
+        assert!((cost - 0.02).abs() < 1e-12, "2e9 nano-AIU is $0.02: {cost}");
+    }
+
+    #[test]
+    fn copilot_usage_nested_in_the_usage_frame_sets_the_cost() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                event(concat!(
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"#,
+                    r#""usage":{"output_tokens":3,"copilot_usage":{"total_nano_aiu":100000000000}}}"#
+                )),
+                &mut sink,
+            )
+            .expect("event feeds");
+        assert_eq!(assembler.finish().usage.cost_usd, Some(1.0));
+    }
+
+    #[test]
     fn a_text_stream_assembles_end_turn_with_split_usage() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
@@ -2209,6 +2304,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 13,
                 output_tokens: 2,
                 cached_input_tokens: 3,
@@ -2254,6 +2350,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 22_149,
                 output_tokens: 2,
                 cached_input_tokens: 20_000,
@@ -2283,6 +2380,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 22_149,
                 output_tokens: 1,
                 cached_input_tokens: 20_000,

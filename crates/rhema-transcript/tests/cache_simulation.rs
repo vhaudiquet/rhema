@@ -582,6 +582,7 @@ impl ModelProvider for SimulatedProvider {
             message: Message::text(Role::Assistant, "ok"),
             stop_reason: StopReason::EndTurn,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: (priced.total / 4) as u32,
                 cached_input_tokens: (priced.read / 4) as u32,
                 output_tokens: 10,

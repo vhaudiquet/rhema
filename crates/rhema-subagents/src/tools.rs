@@ -1635,6 +1635,7 @@ impl EventSink for Forwarder<'_> {
                     .spent
                     .cached_input_tokens
                     .saturating_add(usage.cached_input_tokens);
+                self.spent.add_cost(usage.cost_usd);
                 self.context = Some(usage);
                 self.send();
             }

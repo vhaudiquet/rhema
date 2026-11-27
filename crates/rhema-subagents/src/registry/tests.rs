@@ -404,11 +404,13 @@ fn a_running_job_reports_phase_context_and_spend() {
         &rhema_core::ToolStatus {
             phase: "running".to_owned(),
             context: Some(rhema_core::Usage {
+                cost_usd: None,
                 input_tokens: 100,
                 output_tokens: 10,
                 cached_input_tokens: 90,
             }),
             spent: Some(rhema_core::Usage {
+                cost_usd: None,
                 input_tokens: 200,
                 output_tokens: 20,
                 cached_input_tokens: 0,
@@ -432,6 +434,7 @@ fn a_jobs_spend_bills_only_its_growth() {
         phase: "running".to_owned(),
         context: None,
         spent: Some(Usage {
+            cost_usd: None,
             input_tokens: input,
             output_tokens: output,
             cached_input_tokens: 0,
@@ -444,6 +447,7 @@ fn a_jobs_spend_bills_only_its_growth() {
         vec![(
             "worker-model".to_owned(),
             Usage {
+                cost_usd: None,
                 input_tokens: 200,
                 output_tokens: 20,
                 cached_input_tokens: 0,
@@ -462,12 +466,50 @@ fn a_jobs_spend_bills_only_its_growth() {
         vec![(
             "worker-model".to_owned(),
             Usage {
+                cost_usd: None,
                 input_tokens: 150,
                 output_tokens: 25,
                 cached_input_tokens: 0,
             }
         )]
     );
+}
+
+#[test]
+fn a_providers_bill_bills_only_its_growth() {
+    let registry = registry();
+    let job = registry.mint("scout");
+    registry.mark_running(&job.id, Some("worker-model".into()));
+    let status = |cost: f64| rhema_core::ToolStatus {
+        phase: "running".to_owned(),
+        context: None,
+        spent: Some(Usage {
+            cost_usd: Some(cost),
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 0,
+        }),
+        model: None,
+    };
+    registry.report(&job.id, &status(0.30));
+    assert_eq!(
+        registry.take_spend(),
+        vec![(
+            "worker-model".to_owned(),
+            Usage {
+                cost_usd: Some(0.30),
+                input_tokens: 100,
+                output_tokens: 10,
+                cached_input_tokens: 0,
+            }
+        )],
+        "the first report is the whole bill"
+    );
+    registry.report(&job.id, &status(0.50));
+    let spend = registry.take_spend();
+    assert_eq!(spend.len(), 1);
+    let cost = spend[0].1.cost_usd.expect("the bill rides the spend");
+    assert!((cost - 0.20).abs() < 1e-12, "growth alone bills: {cost}");
 }
 
 #[test]
@@ -480,6 +522,7 @@ fn a_restarted_job_bills_its_rerun_afresh() {
         phase: "running".to_owned(),
         context: None,
         spent: Some(Usage {
+            cost_usd: None,
             input_tokens: 100,
             output_tokens: 10,
             cached_input_tokens: 0,
@@ -499,6 +542,7 @@ fn a_restarted_job_bills_its_rerun_afresh() {
         vec![(
             "worker-model".to_owned(),
             Usage {
+                cost_usd: None,
                 input_tokens: 100,
                 output_tokens: 10,
                 cached_input_tokens: 0,

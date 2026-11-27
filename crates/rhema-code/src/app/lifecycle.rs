@@ -239,16 +239,19 @@ impl App {
     /// every engine step is one billed model call, so the footer's figure
     /// covers the turn's whole tool chain and not only its last call,
     /// the dropped intermediate steps were where most of the spend sat.
-    /// A model the catalog cannot price adds nothing.
+    /// A provider's own bill wins over the catalog; a model the catalog
+    /// cannot price adds nothing when the provider reported no bill.
     pub(crate) fn price_step(&mut self, owned: &OwnedEvent) {
-        if let OwnedEvent::StepEnd { usage, .. } = owned
-            && let Some(pricing) = self.current_model_pricing()
-        {
-            self.session_cost += pricing.cost(
-                u64::from(usage.input_tokens),
-                u64::from(usage.output_tokens),
-                u64::from(usage.cached_input_tokens),
-            );
+        if let OwnedEvent::StepEnd { usage, .. } = owned {
+            if let Some(cost) = usage.cost_usd {
+                self.session_cost += cost;
+            } else if let Some(pricing) = self.current_model_pricing() {
+                self.session_cost += pricing.cost(
+                    u64::from(usage.input_tokens),
+                    u64::from(usage.output_tokens),
+                    u64::from(usage.cached_input_tokens),
+                );
+            }
         }
     }
 
@@ -257,16 +260,19 @@ impl App {
     /// billed model call, so the footer's figure covers the delegates
     /// beside the parent's own calls. A job may run on a different
     /// model than the session, so each entry prices by its own card,
-    /// and a model the catalog cannot price adds nothing. Called every
-    /// tick, and before a rebuild replaces the handle, so the last
-    /// steps of a conversation that is being left still land.
+    /// unless the provider reported its own bill. A model the catalog
+    /// cannot price adds nothing when the provider reported no bill.
+    /// Called every tick, and before a rebuild replaces the handle, so
+    /// the last steps of a conversation that is being left still land.
     pub(crate) fn account_subagent_spend(&mut self) {
         let Some(handle) = self.subagents.as_ref() else {
             return;
         };
         let spend = handle.take_spend();
         for (model, usage) in spend {
-            if let Some(pricing) = self.model_pricing(&model) {
+            if let Some(cost) = usage.cost_usd {
+                self.session_cost += cost;
+            } else if let Some(pricing) = self.model_pricing(&model) {
                 self.session_cost += pricing.cost(
                     u64::from(usage.input_tokens),
                     u64::from(usage.output_tokens),

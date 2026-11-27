@@ -2564,6 +2564,7 @@ mod scroll_tests {
             },
         });
         app.usage = Some(Usage {
+            cost_usd: None,
             input_tokens: 131_072,
             output_tokens: 0,
             cached_input_tokens: 0,

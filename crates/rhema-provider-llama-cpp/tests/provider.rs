@@ -71,6 +71,7 @@ async fn streams_sse_into_events_and_an_assembled_output() {
     assert_eq!(
         out.usage,
         Usage {
+            cost_usd: None,
             input_tokens: 9,
             output_tokens: 4,
             cached_input_tokens: 2,

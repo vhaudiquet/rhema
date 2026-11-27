@@ -393,6 +393,7 @@ mod tests {
                 ..rhema_transcript::TranscriptStats::default()
             }),
             last_turn: Some(rhema_core::Usage {
+                cost_usd: None,
                 input_tokens: 300,
                 output_tokens: 30,
                 cached_input_tokens: 200,

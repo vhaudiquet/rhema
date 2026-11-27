@@ -42,6 +42,7 @@ fn reply_using(text: &str, usage: Usage) -> ModelOutput {
 /// The token accounting one step bills.
 fn usage(input: u32, output: u32, cached: u32) -> Usage {
     Usage {
+        cost_usd: None,
         input_tokens: input,
         output_tokens: output,
         cached_input_tokens: cached,

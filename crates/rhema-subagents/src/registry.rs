@@ -492,6 +492,11 @@ impl Registry {
                         cached_input_tokens: total
                             .cached_input_tokens
                             .saturating_sub(previous.cached_input_tokens),
+                        cost_usd: match (total.cost_usd, previous.cost_usd) {
+                            (Some(total), Some(previous)) => Some((total - previous).max(0.0)),
+                            (Some(total), None) => Some(total),
+                            (None, _) => None,
+                        },
                     };
                     *spent = Some(total);
                     job.billed = Some(total);
@@ -512,6 +517,7 @@ impl Registry {
             total.cached_input_tokens = total
                 .cached_input_tokens
                 .saturating_add(delta.cached_input_tokens);
+            total.add_cost(delta.cost_usd);
         }
     }
 

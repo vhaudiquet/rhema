@@ -502,6 +502,7 @@ fn any_event_order_assembles_to_the_documented_output(tc: TestCase) {
     assert_eq!(was_completed, terminal.is_some(), "the terminal proof lied");
     let expected_tally = terminal.as_ref().and_then(|terminal| {
         terminal.usage.as_ref().map(|usage| Usage {
+            cost_usd: None,
             input_tokens: usage.input.unwrap_or(0),
             output_tokens: usage.output.unwrap_or(0),
             cached_input_tokens: usage.cached.unwrap_or(0),

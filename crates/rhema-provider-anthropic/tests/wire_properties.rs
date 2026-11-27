@@ -147,6 +147,7 @@ fn wire_usage(frame: &GenFrame) -> WireUsage {
         output_tokens: frame.output,
         cache_read_input_tokens: frame.reads,
         cache_creation_input_tokens: frame.writes,
+        copilot_usage: None,
     }
 }
 
@@ -241,6 +242,7 @@ fn stream_events(script: &Script) -> Vec<StreamEvent> {
     start.message = Some(WireStartMessage {
         id: Some("msg_1".into()),
         usage: script.start_usage.as_ref().map(wire_usage),
+        copilot_usage: None,
     });
     events.push(start);
 

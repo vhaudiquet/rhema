@@ -404,6 +404,7 @@ fn the_inner_lifecycle_becomes_phase_transitions_and_a_spend() {
     });
     sink.emit(Event::StepEnd {
         usage: rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 100,
             output_tokens: 20,
             cached_input_tokens: 80,
@@ -526,12 +527,14 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     };
     sink.emit(Event::ThinkingDelta("hmm"));
     sink.emit(Event::Usage(rhema_core::Usage {
+        cost_usd: None,
         input_tokens: 40_000,
         output_tokens: 10,
         cached_input_tokens: 0,
     }));
     sink.emit(Event::StepEnd {
         usage: rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 40_000,
             output_tokens: 500,
             cached_input_tokens: 0,
@@ -543,6 +546,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
         name: "bash",
     });
     sink.emit(Event::Usage(rhema_core::Usage {
+        cost_usd: None,
         input_tokens: 41_000,
         output_tokens: 20,
         cached_input_tokens: 40_000,
@@ -556,6 +560,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         thinking.context,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 40_000,
             output_tokens: 10,
             cached_input_tokens: 0,
@@ -564,6 +569,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         thinking.spent,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,
@@ -577,6 +583,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         running.context,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 40_000,
             output_tokens: 500,
             cached_input_tokens: 0,
@@ -585,6 +592,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         running.spent,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 40_000,
             output_tokens: 500,
             cached_input_tokens: 0,
@@ -597,6 +605,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         next.context,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 41_000,
             output_tokens: 20,
             cached_input_tokens: 40_000,
@@ -605,6 +614,7 @@ fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
     assert_eq!(
         next.spent,
         Some(rhema_core::Usage {
+            cost_usd: None,
             input_tokens: 40_000,
             output_tokens: 500,
             cached_input_tokens: 0,

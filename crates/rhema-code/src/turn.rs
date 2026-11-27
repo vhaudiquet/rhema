@@ -540,6 +540,7 @@ mod mock_tests {
             message: Message::text(Role::Assistant, text),
             stop_reason: StopReason::EndTurn,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 3,
                 output_tokens: 2,
                 cached_input_tokens: 1,

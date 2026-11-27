@@ -399,6 +399,7 @@ fn chunks(script: &Script) -> Vec<ChatCompletionChunk> {
                     finish_reason: None,
                 }],
                 usage: None,
+                copilot_usage: None,
                 error: None,
             }
         })
@@ -408,11 +409,13 @@ fn chunks(script: &Script) -> Vec<ChatCompletionChunk> {
                 finish_reason: script.finish_reason.clone(),
             }],
             usage: None,
+            copilot_usage: None,
             error: None,
         }))
         .chain(script.usage.iter().map(|usage| ChatCompletionChunk {
             choices: Vec::new(),
             usage: Some(wire_usage(usage)),
+            copilot_usage: None,
             error: None,
         }))
         .collect()
@@ -574,6 +577,7 @@ fn any_chunk_split_assembles_to_the_documented_output(tc: TestCase) {
         // carries it, the output carries it, absent fields read zero,
         // and DeepSeek's top-level cache split counts as cached.
         let expected_tally = script.usage.as_ref().map(|usage| Usage {
+            cost_usd: None,
             input_tokens: usage.prompt.unwrap_or(0),
             output_tokens: usage.completion.unwrap_or(0),
             cached_input_tokens: usage.cached.or(usage.deepseek_hit).unwrap_or(0),

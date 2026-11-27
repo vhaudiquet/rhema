@@ -794,6 +794,7 @@ fn the_breakdown_spreads_reported_input_by_wire_share() {
     ];
     transcript.stage_usage_shares(Some(&system), &[], &messages);
     transcript.record_usage(&Usage {
+        cost_usd: None,
         input_tokens: 10_000,
         output_tokens: 100,
         cached_input_tokens: 0,
@@ -816,6 +817,7 @@ fn the_breakdown_spreads_reported_input_by_wire_share() {
     // The shares consumed: a usage record without a staged request
     // spreads nothing.
     transcript.record_usage(&Usage {
+        cost_usd: None,
         input_tokens: 1_000,
         output_tokens: 0,
         cached_input_tokens: 0,
@@ -829,6 +831,7 @@ fn a_skills_share_past_the_system_clamps() {
     transcript.set_skills_bytes(9_999);
     transcript.stage_usage_shares(Some("short"), &[], &[]);
     transcript.record_usage(&Usage {
+        cost_usd: None,
         input_tokens: 100,
         output_tokens: 0,
         cached_input_tokens: 0,
@@ -1083,6 +1086,7 @@ fn reset_stats_zeroes_the_accounting_and_keeps_the_log() {
     let mut transcript = Transcript::new(TranscriptSettings::default());
     transcript.observe(&[Message::text(Role::User, "kept")]);
     transcript.record_usage(&Usage {
+        cost_usd: None,
         input_tokens: 1_000,
         output_tokens: 100,
         cached_input_tokens: 0,
@@ -1098,6 +1102,7 @@ fn usage_records_and_the_hit_rate_reads() {
     let mut transcript = Transcript::new(TranscriptSettings::default());
     assert!(transcript.stats().cache_hit_rate().is_none());
     transcript.record_usage(&Usage {
+        cost_usd: None,
         input_tokens: 1_000,
         output_tokens: 100,
         cached_input_tokens: 800,
@@ -1123,6 +1128,7 @@ impl ModelProvider for Recording {
             message: Message::text(Role::Assistant, "done"),
             stop_reason: rhema_core::StopReason::EndTurn,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 500,
                 output_tokens: 10,
                 cached_input_tokens: 400,

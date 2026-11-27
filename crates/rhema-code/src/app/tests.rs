@@ -1758,6 +1758,7 @@ fn a_resumed_session_shows_its_saved_usage() {
         ..rhema_transcript::TranscriptStats::default()
     };
     let last_turn = Usage {
+        cost_usd: None,
         input_tokens: 3_000,
         output_tokens: 300,
         cached_input_tokens: 2_000,
@@ -2081,6 +2082,7 @@ fn turn_costs_accumulate_from_the_model_pricing() {
     // pricing rides the step, not the turn's final output.
     h.app.on_event(UiEvent::Engine(OwnedEvent::StepEnd {
         usage: Usage {
+            cost_usd: None,
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cached_input_tokens: 400_000,
@@ -2093,6 +2095,7 @@ fn turn_costs_accumulate_from_the_model_pricing() {
             message: Message::text(Role::Assistant, "done"),
             stop_reason: StopReason::EndTurn,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 1_000_000,
                 output_tokens: 1_000_000,
                 cached_input_tokens: 400_000,
@@ -2106,6 +2109,34 @@ fn turn_costs_accumulate_from_the_model_pricing() {
     // The exit save carries the total, so a resume continues it.
     let (exported, _) = h.app.export_session().unwrap();
     assert!((exported.cost_usd - 4.275).abs() < 1e-9);
+}
+
+#[test]
+fn a_providers_bill_wins_over_the_catalog() {
+    let mut h = harness(Some("k"), None, Session::default());
+    h.app.on_event(UiEvent::Engine(OwnedEvent::StepEnd {
+        usage: Usage {
+            cost_usd: Some(0.02),
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        },
+        stop_reason: StopReason::EndTurn,
+    }));
+    assert!((h.app.session_cost - 0.02).abs() < 1e-12);
+
+    // A reported zero is authoritative: a free call adds nothing even
+    // when a catalog price exists.
+    h.app.on_event(UiEvent::Engine(OwnedEvent::StepEnd {
+        usage: Usage {
+            cost_usd: Some(0.0),
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        },
+        stop_reason: StopReason::EndTurn,
+    }));
+    assert_eq!(h.app.session_cost, 0.02);
 }
 
 #[test]
@@ -2579,6 +2610,7 @@ fn the_context_footprint_estimates_a_loaded_history() {
     // A reported turn wins over the estimate: prompt plus reply,
     // the shape of the next request.
     h.app.usage = Some(Usage {
+        cost_usd: None,
         input_tokens: 500,
         output_tokens: 3,
         cached_input_tokens: 0,
@@ -2598,6 +2630,7 @@ fn the_live_usage_tally_moves_the_gauge_mid_turn() {
     // prompt count already covers the whole conversation, so the
     // gauge reads prompt plus the completion streamed so far.
     h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+        cost_usd: None,
         input_tokens: 400,
         output_tokens: 7,
         cached_input_tokens: 0,
@@ -2606,6 +2639,7 @@ fn the_live_usage_tally_moves_the_gauge_mid_turn() {
 
     // A later frame replaces the tally, never adds to it.
     h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+        cost_usd: None,
         input_tokens: 400,
         output_tokens: 19,
         cached_input_tokens: 0,
@@ -2615,6 +2649,7 @@ fn the_live_usage_tally_moves_the_gauge_mid_turn() {
     // A zero tally is a placeholder, not a measurement: the gauge
     // keeps the last real figure instead of collapsing to 0.
     h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+        cost_usd: None,
         input_tokens: 0,
         output_tokens: 0,
         cached_input_tokens: 0,
@@ -3031,6 +3066,7 @@ fn turn_finished_records_usage_and_errors() {
         )
     };
     let usage = Usage {
+        cost_usd: None,
         input_tokens: 12,
         output_tokens: 3,
         cached_input_tokens: 4,
@@ -9362,6 +9398,7 @@ async fn a_subagents_spend_lands_in_the_session_cost() {
                 message: Message::text(Role::Assistant, "the report"),
                 stop_reason: StopReason::EndTurn,
                 usage: Usage {
+                    cost_usd: None,
                     input_tokens: 1_000_000,
                     output_tokens: 0,
                     cached_input_tokens: 0,

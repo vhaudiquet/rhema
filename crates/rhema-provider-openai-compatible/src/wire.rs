@@ -432,6 +432,10 @@ pub struct ChatCompletionChunk {
     /// honors `stream_options.include_usage`.
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// The Copilot proxy's own bill for the call. Other OpenAI-shaped
+    /// servers omit it.
+    #[serde(default)]
+    pub copilot_usage: Option<WireCopilotUsage>,
     /// The server's error detail, on a stream aborted by a failure: the
     /// chunk body is the whole `{"error": {...}}` wrapper, so this field
     /// holds the detail directly.
@@ -557,6 +561,27 @@ where
         Value::String(text) => text,
         other => serde_json::to_string(&other).unwrap_or_default(),
     }))
+}
+
+/// The `copilot_usage` object the Copilot proxy adds to a response.
+/// The official CLI bills from it, so its `total_nano_aiu` is the
+/// authoritative cost of the call.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct WireCopilotUsage {
+    /// The call's cost in nano-AI units. One US dollar is 100 billion
+    /// nano-AI units.
+    #[serde(default, alias = "totalNanoAiu")]
+    pub total_nano_aiu: Option<f64>,
+}
+
+impl WireCopilotUsage {
+    /// The billed amount in US dollars, when the field is present and
+    /// finite. Zero is a real answer (a free call), not absence.
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.total_nano_aiu
+            .filter(|nano| nano.is_finite() && *nano >= 0.0)
+            .map(|nano| nano / 100_000_000_000.0)
+    }
 }
 
 /// The `usage` object of the final chunk.
@@ -1115,6 +1140,13 @@ impl ChunkAssembler {
                     .unwrap_or_else(|| "mid-stream error".to_owned()),
                 status: None,
             });
+        }
+        if let Some(cost) = chunk
+            .copilot_usage
+            .as_ref()
+            .and_then(WireCopilotUsage::cost_usd)
+        {
+            self.usage.cost_usd = Some(cost);
         }
         if let Some(usage) = chunk.usage {
             // A server may split its tally across chunks, prompt tokens
@@ -1863,6 +1895,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 4,
@@ -1878,6 +1911,43 @@ mod tests {
                 "Usage(Usage { input_tokens: 10, output_tokens: 2, cached_input_tokens: 4 })",
             ]
         );
+    }
+
+    #[test]
+    fn copilot_usage_sets_the_authoritative_cost() {
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                chunk(concat!(
+                    r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2},"#,
+                    r#""copilot_usage":{"total_nano_aiu":1500000000}}"#
+                )),
+                &mut sink,
+            )
+            .expect("chunk feeds");
+        let out = assembler.finish();
+
+        assert_eq!(out.usage.input_tokens, 10);
+        let cost = out.usage.cost_usd.expect("the proxy's bill is kept");
+        assert!(
+            (cost - 0.015).abs() < 1e-12,
+            "1.5e9 nano-AIU is $0.015: {cost}"
+        );
+    }
+
+    #[test]
+    fn a_zero_copilot_bill_is_authoritative_not_absent() {
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                chunk(r#"{"choices":[],"copilot_usage":{"total_nano_aiu":0}}"#),
+                &mut sink,
+            )
+            .expect("chunk feeds");
+        let out = assembler.finish();
+        assert_eq!(out.usage.cost_usd, Some(0.0));
     }
 
     #[test]
@@ -2472,6 +2542,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 9,
                 output_tokens: 7,
                 cached_input_tokens: 3,
@@ -2688,6 +2759,7 @@ mod fragment_tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 4,

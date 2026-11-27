@@ -231,19 +231,25 @@ pub(crate) fn subagent_line(
         spans.push(Span::raw(format!(" · {figure}")).fg(theme.text3));
     }
     // The cost reads the cumulative spend: every re-sent prompt bills
-    // again, so the spend legitimately outgrows the window.
-    if let Some(pricing) = subagent
-        .model
-        .as_deref()
-        .and_then(|model| app.model_pricing(model))
-        && let Some(spent) = subagent.spent
-    {
-        let cost = pricing.cost(
-            u64::from(spent.input_tokens),
-            u64::from(spent.output_tokens),
-            u64::from(spent.cached_input_tokens),
-        );
-        spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
+    // again, so the spend legitimately outgrows the window. A bill the
+    // provider reported wins over the card's rate.
+    if let Some(spent) = subagent.spent {
+        let cost = spent.cost_usd.or_else(|| {
+            subagent
+                .model
+                .as_deref()
+                .and_then(|model| app.model_pricing(model))
+                .map(|pricing| {
+                    pricing.cost(
+                        u64::from(spent.input_tokens),
+                        u64::from(spent.output_tokens),
+                        u64::from(spent.cached_input_tokens),
+                    )
+                })
+        });
+        if let Some(cost) = cost {
+            spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
+        }
     }
     spans.push(
         Span::raw(format!(

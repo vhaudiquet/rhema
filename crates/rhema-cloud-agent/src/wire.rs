@@ -285,6 +285,7 @@ mod tests {
         // drop the frame.
         assert_eq!(
             serde_json::to_value(ServerMessage::from_event(Event::Usage(Usage {
+                cost_usd: None,
                 input_tokens: 9,
                 output_tokens: 2,
                 cached_input_tokens: 1,

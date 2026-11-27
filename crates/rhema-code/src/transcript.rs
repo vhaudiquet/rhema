@@ -612,6 +612,7 @@ mod tests {
         transcript.apply(&OwnedEvent::StepStart { iteration: 0 });
         transcript.apply(&OwnedEvent::StepEnd {
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 3,
                 output_tokens: 2,
                 cached_input_tokens: 1,

@@ -57,6 +57,7 @@ async fn main() {
             },
             stop_reason: StopReason::ToolUse,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 11,
                 output_tokens: 8,
                 cached_input_tokens: 0,
@@ -66,6 +67,7 @@ async fn main() {
             message: Message::text(Role::Assistant, "echo says: hello, rhema"),
             stop_reason: StopReason::EndTurn,
             usage: Usage {
+                cost_usd: None,
                 input_tokens: 29,
                 output_tokens: 6,
                 cached_input_tokens: 11,

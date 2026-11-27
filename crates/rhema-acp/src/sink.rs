@@ -51,7 +51,8 @@ pub(crate) struct SessionMeter {
 }
 
 impl SessionMeter {
-    /// Records one step's usage and prices it.
+    /// Records one step's usage and prices it. A provider's own bill
+    /// wins over the card's rate, including a reported zero.
     pub(crate) fn record(&mut self, usage: &Usage, pricing: Option<&Pricing>) {
         let input = u64::from(usage.input_tokens);
         let output = u64::from(usage.output_tokens);
@@ -60,7 +61,9 @@ impl SessionMeter {
         self.output_tokens += output;
         self.cached_read_tokens += cached;
         self.context_used = input + output;
-        if let Some(pricing) = pricing {
+        if let Some(cost) = usage.cost_usd {
+            self.cost_usd += cost;
+        } else if let Some(pricing) = pricing {
             self.cost_usd += pricing.cost(input, output, cached);
         }
     }
@@ -315,6 +318,41 @@ mod tests {
     }
 
     #[test]
+    fn a_providers_bill_wins_over_the_card() {
+        let pricing = Pricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 3.0,
+            cached_input_per_mtok: None,
+        };
+        let mut meter = SessionMeter::default();
+        meter.record(
+            &Usage {
+                cost_usd: Some(0.02),
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cached_input_tokens: 400,
+            },
+            Some(&pricing),
+        );
+        let (_, _, _, _, cost) = meter.totals();
+        assert_eq!(cost, 0.02);
+
+        // A reported zero is authoritative: the card's rate does not
+        // apply to a free call.
+        meter.record(
+            &Usage {
+                cost_usd: Some(0.0),
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cached_input_tokens: 400,
+            },
+            Some(&pricing),
+        );
+        let (_, _, _, _, cost) = meter.totals();
+        assert_eq!(cost, 0.02);
+    }
+
+    #[test]
     fn the_meter_sums_steps_and_prices_them() {
         let pricing = Pricing {
             input_per_mtok: 1.0,
@@ -326,6 +364,7 @@ mod tests {
         assert_eq!(meter.context_used(), 0);
         meter.record(
             &Usage {
+                cost_usd: None,
                 input_tokens: 1_000,
                 output_tokens: 100,
                 cached_input_tokens: 400,

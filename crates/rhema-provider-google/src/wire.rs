@@ -845,6 +845,7 @@ impl ChunkAssembler {
         }
         if let Some(usage) = &chunk.usage_metadata {
             self.usage = Usage {
+                cost_usd: None,
                 input_tokens: usage.prompt_token_count.unwrap_or(0),
                 // Gemini bills a thinking model's reasoning tokens as
                 // output, so the sum is what the bill and every
@@ -1478,6 +1479,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 0,
@@ -1900,6 +1902,7 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 9,
                 output_tokens: 7,
                 cached_input_tokens: 3,
@@ -1926,6 +1929,7 @@ mod tests {
         assert_eq!(
             assembler.finish().usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 10,
                 output_tokens: 10,
                 cached_input_tokens: 0,

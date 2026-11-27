@@ -71,7 +71,8 @@ use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
 
 use crate::wire::{
-    Dialect, OPENAI_COMPATIBLE, arguments_text, joined_texts, parse_args, reasoning_effort_value,
+    Dialect, OPENAI_COMPATIBLE, WireCopilotUsage, arguments_text, joined_texts, parse_args,
+    reasoning_effort_value,
 };
 
 // --- Request wire types (serialize) ---
@@ -465,6 +466,8 @@ pub struct WireStreamEvent {
     pub item_id: Option<String>,
     /// The full response object the terminal events carry.
     pub response: Option<WireResponseBody>,
+    /// The Copilot proxy's own bill for the call. Other servers omit it.
+    pub copilot_usage: Option<WireCopilotUsage>,
     /// A mid-stream error's message (`{"type":"error"}`).
     pub message: Option<String>,
     /// A mid-stream error's code (`{"type":"error"}`).
@@ -501,6 +504,9 @@ pub struct WireResponseBody {
     pub incomplete_details: Option<WireIncompleteDetails>,
     /// Token accounting, when the server reports it.
     pub usage: Option<WireResponsesUsage>,
+    /// The Copilot proxy's own bill for the call, when it rode the
+    /// terminal response instead of the event.
+    pub copilot_usage: Option<WireCopilotUsage>,
     /// The failure's details, on a failed response.
     pub error: Option<WireResponseError>,
 }
@@ -613,6 +619,13 @@ impl ResponsesAssembler {
         event: WireStreamEvent,
         sink: &mut dyn EventSink,
     ) -> Result<(), ProviderError> {
+        if let Some(cost) = event
+            .copilot_usage
+            .as_ref()
+            .and_then(WireCopilotUsage::cost_usd)
+        {
+            self.usage.cost_usd = Some(cost);
+        }
         match event.kind.as_str() {
             "response.output_item.added" => {
                 if let Some(item) = event.item {
@@ -663,8 +676,16 @@ impl ResponsesAssembler {
             }
             "response.completed" | "response.incomplete" => {
                 if let Some(response) = &event.response {
+                    if let Some(cost) = response
+                        .copilot_usage
+                        .as_ref()
+                        .and_then(WireCopilotUsage::cost_usd)
+                    {
+                        self.usage.cost_usd = Some(cost);
+                    }
                     if let Some(usage) = &response.usage {
                         self.usage = Usage {
+                            cost_usd: self.usage.cost_usd,
                             input_tokens: usage.input_tokens.unwrap_or(0),
                             output_tokens: usage.output_tokens.unwrap_or(0),
                             cached_input_tokens: usage
@@ -1361,6 +1382,47 @@ mod tests {
         assert_eq!(out.usage.input_tokens, 10);
         assert_eq!(out.usage.cached_input_tokens, 4);
         assert_eq!(out.stop_reason, StopReason::ToolUse);
+    }
+
+    #[test]
+    fn copilot_usage_on_the_terminal_event_sets_the_cost() {
+        let mut assembler = ResponsesAssembler::new();
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                event(concat!(
+                    r#"{"type":"response.completed","copilot_usage":{"total_nano_aiu":2500000000},"#,
+                    r#""response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":2}}}"#
+                )),
+                &mut sink,
+            )
+            .expect("event is not an error");
+        let out = assembler.finish();
+
+        assert_eq!(out.usage.input_tokens, 10);
+        let cost = out.usage.cost_usd.expect("the proxy's bill is kept");
+        assert!(
+            (cost - 0.025).abs() < 1e-12,
+            "2.5e9 nano-AIU is $0.025: {cost}"
+        );
+    }
+
+    #[test]
+    fn copilot_usage_nested_in_the_response_sets_the_cost() {
+        let mut assembler = ResponsesAssembler::new();
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                event(concat!(
+                    r#"{"type":"response.completed","response":{"status":"completed","#,
+                    r#""copilot_usage":{"total_nano_aiu":100000000000},"#,
+                    r#""usage":{"input_tokens":1,"output_tokens":1}}}"#
+                )),
+                &mut sink,
+            )
+            .expect("event is not an error");
+        let out = assembler.finish();
+        assert_eq!(out.usage.cost_usd, Some(1.0));
     }
 
     #[test]

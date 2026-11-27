@@ -800,6 +800,7 @@ fn usage_of(response: &Value) -> Usage {
         return Usage::default();
     };
     Usage {
+        cost_usd: None,
         input_tokens: u32_of(usage.get("input_tokens")),
         output_tokens: u32_of(usage.get("output_tokens")),
         cached_input_tokens: u32_of(
@@ -1137,6 +1138,7 @@ mod tests {
         assert_eq!(
             output.usage,
             Usage {
+                cost_usd: None,
                 input_tokens: 7,
                 output_tokens: 3,
                 cached_input_tokens: 2,

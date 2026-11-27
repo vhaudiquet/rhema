@@ -493,6 +493,7 @@ mod tests {
                     // caller that watched only the tally watched no
                     // content.
                     sink.emit(Event::Usage(Usage {
+                        cost_usd: None,
                         input_tokens: 10,
                         output_tokens: 1,
                         cached_input_tokens: 0,
