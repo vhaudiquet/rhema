@@ -13,16 +13,37 @@ on:
   push:
     tags:
       - "v*"
+  # A tag run reads this file from the tagged commit, so a fix that
+  # lands after the tag cannot be re-run from the tag. This entry
+  # builds a named tag with the default branch's workflow and attaches
+  # the assets to that tag's release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach (for example v0.5.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   darwin-binaries:
-    if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: macos-14
+    # Gitea reads .github/workflows too. This job is GitHub-only: it
+    # publishes to the GitHub release, and the mirror is the side with
+    # the arm64 image.
+    if: ${{ github.server_url == 'https://github.com' && !contains(inputs.tag || github.ref_name, '-') }}
+    # macOS 14 retired on 2 November 2026, and the latest image is the
+    # arm64 one. The assertion below fails the job if a label swing
+    # ever lands it on an x64 host, so the artifact's name stays true.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Assert an arm64 host
+        run: test "$(uname -m)" = arm64
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -46,8 +67,9 @@ jobs:
       - name: Attach to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="$TAG"
           # A re-run of the same tag meets its own release: creation
           # failure is tolerated, --clobber replaces the assets.
           gh release create "$tag" --title "$tag" \
