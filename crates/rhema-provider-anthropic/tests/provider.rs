@@ -937,3 +937,25 @@ async fn an_unrelated_400_is_never_retried_as_a_thinking_form() {
     );
     server.verify().await;
 }
+
+#[tokio::test]
+async fn a_proxy_done_sentinel_after_message_stop_is_ignored() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body() + "data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut sink = Collector(vec![]);
+    let out = provider(&server)
+        .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
+        .await
+        .expect("the proxy sentinel is not a chunk");
+    assert_eq!(out.message.content, vec![Content::Text("Hello".into())]);
+    assert_eq!(out.stop_reason, StopReason::EndTurn);
+}

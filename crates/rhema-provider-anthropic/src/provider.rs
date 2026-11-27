@@ -68,6 +68,12 @@ const MODELS_PAGE_LIMIT: u32 = 1000;
 /// unbounded.
 const LIST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The end sentinel an OpenAI-shaped proxy may append to a Messages
+/// stream. Anthropic's own API ends at `message_stop`; Copilot's proxy
+/// forwards the chat dialect's `[DONE]` after it, and it is not a JSON
+/// event.
+const DONE_SENTINEL: &str = "[DONE]";
+
 /// Anthropic backend, speaking the Messages API.
 pub struct AnthropicProvider {
     api_key: String,
@@ -535,6 +541,9 @@ impl AnthropicProvider {
                 return Err(transport_error(TransportError::Other(err)));
             }
             for payload in payloads {
+                if payload.trim() == DONE_SENTINEL {
+                    return finished(assembler);
+                }
                 feed_chunk(&payload, &mut assembler, sink)?;
             }
         }
@@ -543,20 +552,27 @@ impl AnthropicProvider {
             return Err(transport_error(TransportError::Other(err)));
         }
         for payload in payloads {
+            if payload.trim() == DONE_SENTINEL {
+                break;
+            }
             feed_chunk(&payload, &mut assembler, sink)?;
         }
-        // A `message_delta` is this wire's terminal proof: the one
-        // stream event that carries the final stop reason and usage.
-        // The bytes running out before one is a truncated stream, not
-        // a silent stop; the retry ladder sees a retryable transport
-        // failure and re-issues.
-        if !assembler.has_terminal() {
-            return Err(transport_error(TransportError::Other(
-                "the anthropic stream ended without its message_delta".into(),
-            )));
-        }
-        Ok(assembler.finish())
+        finished(assembler)
     }
+}
+
+/// The stream's end, checked before the assembled output stands as a
+/// result. A `message_delta` is this wire's terminal proof: the one
+/// stream event that carries the final stop reason and usage. The bytes
+/// running out before one is a truncated stream, not a silent stop; the
+/// retry ladder sees a retryable transport failure and re-issues.
+fn finished(assembler: ChunkAssembler) -> Result<ModelOutput, ProviderError> {
+    if !assembler.has_terminal() {
+        return Err(transport_error(TransportError::Other(
+            "the anthropic stream ended without its message_delta".into(),
+        )));
+    }
+    Ok(assembler.finish())
 }
 
 #[cfg(test)]

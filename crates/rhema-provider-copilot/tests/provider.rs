@@ -89,6 +89,10 @@ fn messages_sse_body() -> String {
         "event: message_stop",
         r#"data: {"type":"message_stop"}"#,
         "",
+        // The proxy closes the Messages stream with the chat dialect's
+        // sentinel after message_stop.
+        "data: [DONE]",
+        "",
     ]
     .join("\n")
 }
