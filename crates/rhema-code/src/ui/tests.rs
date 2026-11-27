@@ -1443,6 +1443,54 @@ fn wrap_hard_splits_oversized_words() {
     }
 }
 
+/// A link label wrapped across rows keeps its cells, one run per row,
+/// so a click on any piece opens the same URL.
+#[test]
+fn a_wrapped_link_keeps_its_cells_on_each_row() {
+    use crate::markdown::LinkSpan;
+    let label = "alpha beta gamma";
+    let line = Line::from(vec![
+        Span::raw("lead "),
+        Span::styled(
+            label,
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::UNDERLINED),
+        ),
+    ]);
+    let link = LinkSpan {
+        row: 0,
+        start: 5,
+        end: 5 + label.width(),
+        url: "https://example.com".to_owned(),
+    };
+    let (rows, links) = wrap_line_with_links(&line, 12, std::slice::from_ref(&link));
+    assert!(rows.len() > 1, "the label wraps: {rows:?}");
+    assert_eq!(
+        links.iter().map(|link| link.row).collect::<BTreeSet<_>>(),
+        (0..rows.len()).collect::<BTreeSet<_>>(),
+        "every row the label crosses reports its cells: {links:?}"
+    );
+    let mut covered = String::new();
+    for cell in &links {
+        assert_eq!(cell.url, "https://example.com");
+        let text: String = rows[cell.row]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let piece: String = text
+            .chars()
+            .skip(cell.start)
+            .take(cell.end - cell.start)
+            .collect();
+        covered.push_str(&piece);
+        covered.push(' ');
+    }
+    assert_eq!(
+        covered.split_whitespace().collect::<Vec<_>>(),
+        ["alpha", "beta", "gamma"]
+    );
+}
+
 /// The footer reads the bare model name: an OpenRouter id's vendor
 /// prefix is cut, plain ids pass through.
 #[test]
@@ -3385,6 +3433,48 @@ mod scroll_tests {
         assert!(!screen.contains("alpha"), "the head scrolled out: {screen}");
     }
 
+    /// A markdown link in a response becomes clickable cells on the
+    /// drawn frame: the label's exact columns and the URL beside them.
+    #[test]
+    fn a_markdown_link_lands_on_its_label_cells() {
+        let mut app = chat_app();
+        app.transcript.apply(&crate::events::OwnedEvent::TextDelta(
+            "see [the docs](https://example.com/x) now".into(),
+        ));
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let view = &app.transcript_view;
+        let link = view.links.first().cloned().expect("the link is clickable");
+        assert_eq!(link.url, "https://example.com/x");
+        let row = (link.area.y - view.area.y) as usize;
+        let covered: String = view.rows[row]
+            .chars()
+            .skip((link.area.x - view.area.x) as usize)
+            .take(link.area.width as usize)
+            .collect();
+        assert_eq!(covered, "the docs");
+        assert_eq!(
+            view.link_at(link.area.x + 1, link.area.y),
+            Some("https://example.com/x"),
+            "a cell inside the label opens the URL"
+        );
+        assert_eq!(
+            view.link_at(link.area.x + link.area.width + 1, link.area.y),
+            None,
+            "a cell past the label opens nothing"
+        );
+
+        // A second frame reuses the block from the wrap cache: the
+        // cached cells keep their link.
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        assert_eq!(
+            app.transcript_view.links.first().cloned(),
+            Some(link),
+            "a cached block stays clickable"
+        );
+    }
+
     #[test]
     fn a_blank_row_separates_a_tool_run_from_the_reply() {
         let mut app = chat_app();
@@ -4003,7 +4093,7 @@ fn a_notification_renders_as_a_left_aligned_card() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].kind, pane::Kind::Notification);
     // Wide enough that the sentence fits one padded row whole.
-    let (rows, bubbles) = pane::render_block(&lines, &blocks[0], &theme, 200, "r");
+    let (rows, bubbles, _) = pane::render_block(&lines, &blocks[0], &theme, 200, "r");
     let geometry = bubbles[0];
     assert_eq!(geometry.left, 0, "the card hugs the left edge");
     assert_eq!(geometry.fill, pane::CardFill::Notice);
@@ -4022,7 +4112,7 @@ fn a_notification_renders_as_a_left_aligned_card() {
         "the card carries the line: {flat}"
     );
     // Narrow, the card still frames: the sentence wraps, the glyphs hold.
-    let (narrow, _) = pane::render_block(&lines, &blocks[0], &theme, 40, "r");
+    let (narrow, _, _) = pane::render_block(&lines, &blocks[0], &theme, 40, "r");
     assert!(narrow[0].spans.iter().any(|s| s.content.contains('╭')));
     assert!(narrow.len() > 2, "the body wrapped: {}", narrow.len());
 }
@@ -4069,7 +4159,7 @@ fn a_run_of_notifications_is_one_block_of_stacked_cards() {
     assert_eq!(blocks.len(), 1, "both cards sit in one block");
     assert_eq!(blocks[0].start, 0);
     assert_eq!(blocks[0].end, 2);
-    let (_, bubbles) = pane::render_block(&lines, &blocks[0], &theme, 80, "r");
+    let (_, bubbles, _) = pane::render_block(&lines, &blocks[0], &theme, 80, "r");
     assert_eq!(bubbles.len(), 2, "one card per finish");
     assert!(bubbles.iter().all(|geometry| geometry.left == 0));
 }

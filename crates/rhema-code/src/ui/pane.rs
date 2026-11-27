@@ -237,6 +237,9 @@ pub(crate) fn render_transcript(
         rows.push(Line::from(""));
     }
     let mut bubbles: Vec<(usize, BubbleGeom)> = Vec::new();
+    // Link labels in canvas-row coordinates, before the viewport slices
+    // the canvas.
+    let mut block_links: Vec<crate::markdown::LinkSpan> = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
         if index > 0
             && matches!(
@@ -253,14 +256,22 @@ pub(crate) fn render_transcript(
             for geometry in &cached.bubbles {
                 bubbles.push((block_top + geometry.first_row, *geometry));
             }
+            for link in &cached.links {
+                block_links.push(crate::markdown::LinkSpan {
+                    row: block_top + link.row,
+                    ..link.clone()
+                });
+            }
         } else {
-            let (rendered, geoms) = render_block(lines, block, theme, width, app.icons.robot);
+            let (rendered, geoms, links) =
+                render_block(lines, block, theme, width, app.icons.robot);
             let cached = CachedBlock {
                 start: block.start,
                 end: block.end,
                 first: lines[block.start].clone(),
                 bubbles: geoms.clone(),
                 rows: rendered.clone(),
+                links: links.clone(),
             };
             let cache = &mut app.transcript_cache;
             if index < cache.blocks.len() {
@@ -270,6 +281,12 @@ pub(crate) fn render_transcript(
             }
             for geometry in &geoms {
                 bubbles.push((block_top + geometry.first_row, *geometry));
+            }
+            for link in &links {
+                block_links.push(crate::markdown::LinkSpan {
+                    row: block_top + link.row,
+                    ..link.clone()
+                });
             }
             rows.extend(rendered);
         }
@@ -298,6 +315,32 @@ pub(crate) fn render_transcript(
         }
         None => max_top - app.chat.scroll,
     };
+    // The links the window shows, mapped from canvas rows onto screen
+    // cells. A run absent from the window is not clickable, and the
+    // full URL stays beside the cells rather than in the text.
+    let links: Vec<crate::app::selection::LinkHit> = block_links
+        .iter()
+        .filter_map(|link| {
+            let row = link.row.checked_sub(top)?;
+            if row >= visible {
+                return None;
+            }
+            let start = link.start;
+            let width = link.end.saturating_sub(link.start);
+            if width == 0 || start >= inner.width as usize {
+                return None;
+            }
+            Some(crate::app::selection::LinkHit {
+                area: Rect::new(
+                    inner.x + start as u16,
+                    inner.y + row as u16,
+                    width.min(inner.width as usize - start) as u16,
+                    1,
+                ),
+                url: link.url.clone(),
+            })
+        })
+        .collect();
     // The prompt card: the screen cells its sprites cover, restated
     // for the runner's graphics pass. The card is a nine-slice, four
     // corner arcs at one cell each, the four edges and the interior as
@@ -459,6 +502,7 @@ pub(crate) fn render_transcript(
         top,
         rows: visible_rows,
         rail: None,
+        links,
     };
     if let Some(selection) = app.selection {
         crate::app::selection::highlight(frame, &app.transcript_view, selection);
@@ -518,17 +562,21 @@ fn render_scroll_rail(
 /// between blocks live at assembly, so a block's rows are cacheable
 /// regardless of what comes after it. A graphical prompt block also
 /// reports its cards' geometry, in the same row coordinates the rows
-/// use.
+/// use; markdown links report the cells their labels cover.
 pub(crate) fn render_block(
     lines: &[transcript::Line],
     block: &TranscriptBlock,
     theme: &Theme,
     width: usize,
     robot: &'static str,
-) -> (Vec<Line<'static>>, Vec<BubbleGeom>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<BubbleGeom>,
+    Vec<crate::markdown::LinkSpan>,
+) {
     let mut bubbles: Vec<BubbleGeom> = Vec::new();
     let range = &lines[block.start..block.end];
-    let raw: Vec<Line<'static>> = match block.kind {
+    let (raw, raw_links): (Vec<Line<'static>>, Vec<crate::markdown::LinkSpan>) = match block.kind {
         Kind::Response => {
             // One markdown response, the bullet on its first row.
             let source = range
@@ -539,7 +587,9 @@ pub(crate) fn render_block(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            crate::markdown::render_markdown(&source, theme, width)
+            let (lines, mut links) =
+                crate::markdown::render_markdown_with_links(&source, theme, width);
+            let rows = lines
                 .into_iter()
                 .enumerate()
                 .map(|(index, mut line)| {
@@ -551,7 +601,15 @@ pub(crate) fn render_block(
                     }
                     line
                 })
-                .collect()
+                .collect();
+            // The bullet shifts the first row's cells by its own width.
+            for link in &mut links {
+                if link.row == 0 {
+                    link.start += 2;
+                    link.end += 2;
+                }
+            }
+            (rows, links)
         }
         Kind::User => {
             let mut rows: Vec<Line<'static>> = Vec::new();
@@ -572,7 +630,7 @@ pub(crate) fn render_block(
                 }
                 rows.append(&mut bubble_rows);
             }
-            rows
+            (rows, Vec::new())
         }
         Kind::Notification => {
             let mut rows: Vec<Line<'static>> = Vec::new();
@@ -587,42 +645,82 @@ pub(crate) fn render_block(
                 bubbles.extend(geoms);
                 rows.append(&mut card_rows);
             }
-            rows
+            (rows, Vec::new())
         }
         // The run's absorbed empty text parts render as nothing.
-        Kind::ToolRun => range
-            .iter()
-            .filter_map(|line| match line {
-                transcript::Line::ToolCall { args, ok, code, .. } if name_is_bash(line) => {
-                    Some(tool_row(args, *ok, *code, width, theme))
-                }
-                transcript::Line::ToolCall { .. } => Some(render_line(line, theme, robot)),
-                _ => None,
-            })
-            .collect(),
-        Kind::Notice => range
-            .iter()
-            .map(|line| render_line(line, theme, robot))
-            .collect(),
-        Kind::Markdown => range
-            .iter()
-            .filter_map(|line| match line {
+        Kind::ToolRun => (
+            range
+                .iter()
+                .filter_map(|line| match line {
+                    transcript::Line::ToolCall { args, ok, code, .. } if name_is_bash(line) => {
+                        Some(tool_row(args, *ok, *code, width, theme))
+                    }
+                    transcript::Line::ToolCall { .. } => Some(render_line(line, theme, robot)),
+                    _ => None,
+                })
+                .collect(),
+            Vec::new(),
+        ),
+        Kind::Notice => (
+            range
+                .iter()
+                .map(|line| render_line(line, theme, robot))
+                .collect(),
+            Vec::new(),
+        ),
+        Kind::Markdown => {
+            let mut rows = Vec::new();
+            let mut links = Vec::new();
+            for source in range.iter().filter_map(|line| match line {
                 transcript::Line::Markdown(source) => Some(source.as_str()),
                 _ => None,
-            })
-            .flat_map(|source| crate::markdown::render_markdown(source, theme, width))
-            .collect(),
+            }) {
+                let (rendered, mut spans) =
+                    crate::markdown::render_markdown_with_links(source, theme, width);
+                let base = rows.len();
+                for link in &mut spans {
+                    link.row += base;
+                }
+                rows.extend(rendered);
+                links.append(&mut spans);
+            }
+            (rows, links)
+        }
     };
     if block.kind == Kind::User {
         // A prompt arrives already wrapped to its bubble's width and
         // filled out to the row: re-wrapping would drop the right-side
         // padding that holds the bubble against the edge.
-        return (raw, bubbles);
+        return (raw, bubbles, Vec::new());
     }
-    (
-        raw.iter().flat_map(|line| wrap_line(line, width)).collect(),
-        bubbles,
-    )
+    let (rows, links) = wrap_links(raw, raw_links, width);
+    (rows, bubbles, links)
+}
+
+/// Wraps a block's raw rows to `width` and moves each link's cell run to
+/// the row it landed on.
+fn wrap_links(
+    raw: Vec<Line<'static>>,
+    links: Vec<crate::markdown::LinkSpan>,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<crate::markdown::LinkSpan>) {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut out: Vec<crate::markdown::LinkSpan> = Vec::new();
+    for (index, line) in raw.iter().enumerate() {
+        let line_links: Vec<crate::markdown::LinkSpan> = links
+            .iter()
+            .filter(|link| link.row == index)
+            .cloned()
+            .collect();
+        let (wrapped, mut landed) = super::wrap_line_with_links(line, width, &line_links);
+        let base = rows.len();
+        for link in &mut landed {
+            link.row += base;
+        }
+        rows.extend(wrapped);
+        out.append(&mut landed);
+    }
+    (rows, out)
 }
 
 /// The share of the transcript width a prompt bubble may occupy: at

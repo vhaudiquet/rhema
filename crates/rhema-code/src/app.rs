@@ -228,6 +228,10 @@ pub struct App {
     /// Whether the left button is dragging the transcript's scroll rail
     /// rather than selecting text.
     pub(crate) rail_drag: bool,
+    /// The link opener a click on a markdown link calls. The default
+    /// hands the URL to the desktop browser; a test swaps in a recorder
+    /// so a click does not launch anything.
+    pub(crate) url_opener: Box<dyn Fn(&str) -> bool + Send>,
     /// The session's assembled sandbox, when `bash` runs on one:
     /// `None` is the local fast path, every agent build applies this
     /// when set, so a mid-session rebuild never drops it.
@@ -719,6 +723,7 @@ impl App {
             transcript_view: Default::default(),
             selection: None,
             rail_drag: false,
+            url_opener: Box::new(crate::open_url::browser),
             sandboxed: setup.sandboxed,
             sandbox_machines: setup.sandbox_machines,
             disabled_mcp_servers: config_disabled_mcp,

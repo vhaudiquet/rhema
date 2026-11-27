@@ -13,12 +13,38 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// One run of cells on a rendered row that stands for a URL: a markdown
+/// link's label as it landed on the row. A click inside the run opens the
+/// URL, so the transcript needs the cells and not just the label text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    /// Index into the lines rendered beside it.
+    pub row: usize,
+    /// The run's first display column, counted from the row's start.
+    pub start: usize,
+    /// One past the run's last display column.
+    pub end: usize,
+    /// The link's target.
+    pub url: String,
+}
+
 /// Renders one assistant response (its full markdown source) into styled
 /// lines at `width` columns, tables lay their columns out against it.
 /// Plain text passes through untouched. Code reads in the accent's text
 /// tone on a surface well, the transcript well is sunken, so code steps
 /// one tier up.
 pub fn render_markdown(source: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    render_markdown_with_links(source, theme, width).0
+}
+
+/// [`render_markdown`], plus the cells every link's label covers. The
+/// rows and columns describe the returned lines; the transcript shifts
+/// them onto the screen when it lays the frame out.
+pub fn render_markdown_with_links(
+    source: &str,
+    theme: &Theme,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     let mut renderer = MarkdownRenderer::new(theme, width);
     for event in Parser::new_ext(
         source,
@@ -83,6 +109,10 @@ struct MarkdownRenderer<'a> {
     table_rows: Vec<Vec<String>>,
     table_row: Vec<String>,
     table_cell: Option<String>,
+    /// The link's target while inside its label; `None` outside.
+    link_url: Option<String>,
+    /// The link labels collected so far, in rendered coordinates.
+    links: Vec<LinkSpan>,
     /// The design tokens; colors never come from literals (rule 1).
     theme: &'a Theme,
     /// The columns tables lay out against, the transcript's width.
@@ -104,6 +134,8 @@ impl<'a> MarkdownRenderer<'a> {
             table_rows: Vec::new(),
             table_row: Vec::new(),
             table_cell: None,
+            link_url: None,
+            links: Vec::new(),
             theme,
             width,
         }
@@ -231,14 +263,23 @@ impl<'a> MarkdownRenderer<'a> {
             Event::End(TagEnd::Emphasis) => self.style.italic = false,
             Event::Start(Tag::Strikethrough) => self.style.strikethrough = true,
             Event::End(TagEnd::Strikethrough) => self.style.strikethrough = false,
-            Event::Start(Tag::Link { .. }) => self.style.link = true,
-            Event::End(TagEnd::Link) => self.style.link = false,
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.style.link = true;
+                self.link_url = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                self.style.link = false;
+                self.link_url = None;
+            }
             Event::Code(code) => match &mut self.table_cell {
                 Some(cell) => cell.push_str(&code),
-                None => self.spans.push(Span::styled(
-                    code.to_string(),
-                    Style::default().fg(self.theme.accent_text),
-                )),
+                None => {
+                    self.note_link(&code);
+                    self.spans.push(Span::styled(
+                        code.to_string(),
+                        Style::default().fg(self.theme.accent_text),
+                    ));
+                }
             },
             Event::Text(text) => {
                 if let Some(cell) = &mut self.table_cell {
@@ -270,6 +311,7 @@ impl<'a> MarkdownRenderer<'a> {
                     }
                 } else {
                     self.indent_line();
+                    self.note_link(&text);
                     self.spans
                         .push(self.style.apply(text.to_string(), self.theme));
                 }
@@ -314,6 +356,26 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
+    /// Records a link label's cells before the span is pushed. The
+    /// columns count this row's spans so far, the cells the frame will
+    /// draw; a label split by a soft break records one run per piece.
+    fn note_link(&mut self, text: &str) {
+        let Some(url) = &self.link_url else {
+            return;
+        };
+        if text.is_empty() || !opens_externally(url) {
+            return;
+        }
+        let start: usize = self.spans.iter().map(|span| span.content.width()).sum();
+        let end = start + text.width();
+        self.links.push(LinkSpan {
+            row: self.lines.len(),
+            start,
+            end,
+            url: url.clone(),
+        });
+    }
+
     /// Pads the line being started to the innermost open item's content
     /// column. A line the renderer already began, an item's marker, a
     /// quote's rail, a soft break's join, keeps its own shape; only a
@@ -344,14 +406,25 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
         self.flush_line();
-        // Trailing blank rows from block ends carry no information.
+        // Trailing blank rows from block ends carry no information. A
+        // link that sat on one of them goes with it.
         while self.lines.last().is_some_and(|line| line.spans.is_empty()) {
             self.lines.pop();
         }
-        self.lines
+        let rows = self.lines.len();
+        self.links.retain(|link| link.row < rows);
+        (self.lines, self.links)
     }
+}
+
+/// Whether a markdown target is a URL a click may hand to the desktop
+/// browser. Only the web schemes pass: a link the model wrote must not
+/// launch a local file or an arbitrary URI handler.
+fn opens_externally(url: &str) -> bool {
+    let scheme = url.split_once(':').map(|(scheme, _)| scheme).unwrap_or("");
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
 }
 
 /// A table as aligned plain columns: a bold header, a rule under it,
@@ -577,6 +650,63 @@ mod tests {
         );
         let code = spans.iter().find(|(text, _)| text == "code").unwrap();
         assert_eq!(code.1.fg, Some(DARK.accent_text));
+    }
+
+    /// A link's label reports the cells it covers and the URL beside
+    /// them, so a click can open what the label stands for.
+    #[test]
+    fn link_labels_report_their_cells_and_target() {
+        let (lines, links) = render_markdown_with_links(
+            "read [the docs](https://example.com/x) now",
+            &crate::palette::DARK,
+            80,
+        );
+        assert_eq!(plain(&lines), ["read the docs now"]);
+        assert_eq!(links.len(), 1, "{links:?}");
+        let link = &links[0];
+        assert_eq!(link.row, 0);
+        assert_eq!(link.start, 5, "the label starts after `read `");
+        assert_eq!(link.url, "https://example.com/x");
+        let covered: String = plain(&lines)[0]
+            .chars()
+            .skip(link.start)
+            .take(link.end - link.start)
+            .collect();
+        assert_eq!(covered, "the docs");
+    }
+
+    /// A click may only hand the browser a web URL: a model-written
+    /// `file:` or custom scheme opens nothing and stays plain text.
+    #[test]
+    fn only_web_links_are_clickable() {
+        let (_, links) = render_markdown_with_links(
+            "[local](file:///etc/passwd) and [web](https://example.com)",
+            &crate::palette::DARK,
+            80,
+        );
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].url, "https://example.com");
+    }
+
+    /// A link's cells count the row's other spans: the quote rail and a
+    /// list marker sit before the label, and a click lands on the label
+    /// only when the columns include them.
+    #[test]
+    fn link_cells_include_the_marker_before_the_label() {
+        let (lines, links) = render_markdown_with_links(
+            "> quote [docs](https://example.com)",
+            &crate::palette::DARK,
+            80,
+        );
+        let line = plain(&lines)[0].clone();
+        let link = &links[0];
+        let covered: String = line
+            .chars()
+            .skip(link.start)
+            .take(link.end - link.start)
+            .collect();
+        assert_eq!(covered, "docs");
+        assert_eq!(link.start, "│ quote ".width());
     }
 
     #[test]

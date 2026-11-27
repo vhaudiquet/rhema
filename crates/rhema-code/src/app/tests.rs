@@ -2698,6 +2698,7 @@ fn a_mouse_down_over_the_transcript_starts_a_selection() {
         top: 7,
         rows: vec!["hello".to_owned()],
         rail: None,
+        links: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     assert_eq!(
@@ -2720,6 +2721,7 @@ fn a_mouse_down_outside_the_drawn_rows_clears_the_selection() {
         top: 0,
         rows: vec!["hello".to_owned()],
         rail: None,
+        links: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     h.app.on_mouse_down(2, 3);
@@ -2727,6 +2729,45 @@ fn a_mouse_down_outside_the_drawn_rows_clears_the_selection() {
         h.app.selection.is_none(),
         "the blank rows below the text select nothing"
     );
+}
+
+/// A click on a markdown link opens its URL; a drag over the same
+/// cells still selects the text, so the label stays copyable.
+#[test]
+fn a_click_on_a_link_opens_it_and_a_drag_selects() {
+    use std::sync::{Arc, Mutex};
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let sink = opened.clone();
+    h.app.url_opener = Box::new(move |url: &str| {
+        sink.lock().unwrap().push(url.to_owned());
+        true
+    });
+    h.app.transcript_view = crate::app::selection::TranscriptView {
+        area: ratatui::layout::Rect::new(0, 0, 20, 4),
+        top: 0,
+        rows: vec!["the docs now".to_owned()],
+        rail: None,
+        links: vec![crate::app::selection::LinkHit {
+            area: ratatui::layout::Rect::new(0, 0, 8, 1),
+            url: "https://example.com/x".to_owned(),
+        }],
+    };
+    h.app.on_mouse_down(2, 0);
+    assert!(h.app.finish_selection(2, 0));
+    assert_eq!(&*opened.lock().unwrap(), &["https://example.com/x"]);
+    assert!(
+        h.app.selection.is_none(),
+        "an opened link leaves no one-cell highlight"
+    );
+
+    // The same press dragged across the label is a selection, not a
+    // click, and it never opens the URL.
+    h.app.on_mouse_down(1, 0);
+    h.app.on_mouse_drag(4, 0);
+    assert!(h.app.finish_selection(4, 0));
+    assert_eq!(opened.lock().unwrap().len(), 1, "the drag opened nothing");
+    assert!(h.app.selection.is_some(), "the drag keeps its selection");
 }
 
 #[test]
@@ -2758,6 +2799,7 @@ fn selected_hello(h: &mut Harness) {
         top: 0,
         rows: vec!["hello".to_owned()],
         rail: None,
+        links: Vec::new(),
     };
     h.app.on_mouse_down(0, 0);
     h.app.on_mouse_drag(3, 0);
@@ -2850,6 +2892,7 @@ fn a_key_clears_the_selection() {
         top: 0,
         rows: vec!["hello".to_owned()],
         rail: None,
+        links: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     h.app.on_key(key(KeyCode::Char('x')));

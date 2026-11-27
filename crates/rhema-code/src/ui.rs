@@ -102,6 +102,9 @@ struct CachedBlock {
     first: crate::transcript::Line,
     bubbles: Vec<crate::ui::pane::BubbleGeom>,
     rows: Vec<Line<'static>>,
+    /// Link labels in the block's row coordinates, so a cached block
+    /// stays clickable.
+    links: Vec<crate::markdown::LinkSpan>,
 }
 
 /// Renders one frame.
@@ -363,6 +366,34 @@ fn display_host(url: &str) -> Option<&str> {
 /// hard-split at the display-width boundary, so the returned row count is
 /// exact for the given width, the transcript scroll math depends on it.
 fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    wrap_line_with_links(line, width, &[]).0
+}
+
+/// [`wrap_line`], carrying link cells through the breaks: an input
+/// [`crate::markdown::LinkSpan`]'s columns are tagged onto the run they
+/// cover, and each output row keeps the sub-ranges that landed on it.
+/// The row fields of the input links are ignored, every link is taken as
+/// belonging to `line`.
+pub(crate) fn wrap_line_with_links(
+    line: &Line<'_>,
+    width: usize,
+    links: &[crate::markdown::LinkSpan],
+) -> (Vec<Line<'static>>, Vec<crate::markdown::LinkSpan>) {
+    let passthrough = |line: &Line<'_>| {
+        let owned: Vec<Span<'static>> = line
+            .spans
+            .iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style))
+            .collect();
+        let links = links
+            .iter()
+            .map(|link| crate::markdown::LinkSpan {
+                row: 0,
+                ..link.clone()
+            })
+            .collect();
+        (vec![Line::from(owned)], links)
+    };
     // A line that already fits passes through verbatim: re-tokenizing
     // would collapse the whitespace runs that table padding and indents
     // depend on. The fit measures display cells, the unit of the
@@ -371,48 +402,50 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     // would hand the terminal a row it clips.
     let total: usize = line.spans.iter().map(|span| span.content.width()).sum();
     if total <= width && width > 0 {
-        let owned: Vec<Span<'static>> = line
-            .spans
-            .iter()
-            .map(|span| Span::styled(span.content.to_string(), span.style))
-            .collect();
-        return vec![Line::from(owned)];
+        return passthrough(line);
     }
     if width == 0 {
-        let owned: Vec<Span<'static>> = line
-            .spans
-            .iter()
-            .map(|span| Span::styled(span.content.to_string(), span.style))
-            .collect();
-        return vec![Line::from(owned)];
+        return passthrough(line);
     }
-    // Flatten the spans to styled runs: maximal word and whitespace runs.
-    let mut runs: Vec<(Style, String)> = Vec::new();
+    // Flatten the spans to styled runs, each tagged with the link whose
+    // cells cover it. Markdown emits a link label as its own spans, so a
+    // span lies inside or outside a link whole.
+    let mut runs: Vec<(Style, String, Option<&str>)> = Vec::new();
+    let mut column = 0usize;
     for span in &line.spans {
+        let span_width = span.content.width();
+        let url = links
+            .iter()
+            .find(|link| column >= link.start && column + span_width <= link.end)
+            .map(|link| link.url.as_str());
         let mut current = String::new();
         let mut current_space = None;
         for ch in span.content.chars() {
             let space = ch.is_whitespace();
             if Some(space) != current_space && !current.is_empty() {
-                runs.push((span.style, std::mem::take(&mut current)));
+                runs.push((span.style, std::mem::take(&mut current), url));
             }
             current_space = Some(space);
             current.push(ch);
         }
         if !current.is_empty() {
-            runs.push((span.style, current));
+            runs.push((span.style, current, url));
         }
+        column += span_width;
     }
 
     let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    // The link cells of each row, in the same order as `rows`.
+    let mut row_links: Vec<Vec<(usize, usize, &str)>> = vec![Vec::new()];
     let mut row_width = 0usize;
-    for (style, run) in runs {
+    for (style, run, url) in runs {
         if run.chars().all(char::is_whitespace) {
             if row_width == 0 {
                 continue; // no leading whitespace on a row
             }
             let run_width = run.width();
             if row_width + run_width <= width {
+                note_link_cells(row_links.last_mut().unwrap(), row_width, run_width, url);
                 row_width += run_width;
                 rows.last_mut().unwrap().push(Span::styled(run, style));
             } else {
@@ -438,13 +471,56 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
         for (index, (piece, piece_width)) in pieces.into_iter().enumerate() {
             if index > 0 || row_width + piece_width > width {
                 rows.push(Vec::new());
+                row_links.push(Vec::new());
                 row_width = 0;
             }
+            note_link_cells(row_links.last_mut().unwrap(), row_width, piece_width, url);
             rows.last_mut().unwrap().push(Span::styled(piece, style));
             row_width += piece_width;
         }
     }
-    rows.into_iter().map(Line::from).collect()
+    let lines: Vec<Line<'static>> = rows.into_iter().map(Line::from).collect();
+    let links = row_links
+        .into_iter()
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            cells
+                .into_iter()
+                .map(move |(start, end, url)| crate::markdown::LinkSpan {
+                    row,
+                    start,
+                    end,
+                    url: url.to_owned(),
+                })
+        })
+        .collect();
+    (lines, links)
+}
+
+/// Extends the row's last link cell run when the new cells continue it,
+/// else starts a run. A word split by the wrap and the whitespace after
+/// it stay one run.
+fn note_link_cells<'a>(
+    cells: &mut Vec<(usize, usize, &'a str)>,
+    start: usize,
+    width: usize,
+    url: Option<&'a str>,
+) {
+    let Some(url) = url else {
+        return;
+    };
+    if width == 0 {
+        return;
+    }
+    let end = start + width;
+    if let Some(last) = cells.last_mut()
+        && last.2 == url
+        && last.1 == start
+    {
+        last.1 = end;
+        return;
+    }
+    cells.push((start, end, url));
 }
 
 /// [`wrap_line`] capped: at most `max_lines` rows of `width` columns,

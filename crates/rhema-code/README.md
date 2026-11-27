@@ -22,6 +22,10 @@ On terminals that speak the kitty graphics protocol (kitty, Ghostty) the wizard 
 
 Drag with the left button over the transcript to select the text between the cell the drag started on and the cell it reached. The selected cells render reversed, and releasing the button copies the text to the system clipboard. On a terminal-only session with no desktop clipboard, the copy goes through the terminal with OSC 52. Any key, the wheel, or a fresh click clears the highlight, and a selection only covers the rows currently on screen.
 
+### Links
+
+A link in an assistant reply renders as its label, and the label is clickable: a left click opens its target in the default browser, and a missing launcher gets a notice instead. Only `http` and `https` targets open; any other scheme stays plain text, so model output cannot hand the desktop a local file or an unknown URI handler. Dragging across the label still selects it, so a link reads and copies like the rest of the transcript.
+
 ### Transcript scroll
 
 The wheel and PgUp/PgDn walk the transcript's history; scrolling back down to the tail returns to the live conversation. While the conversation runs past the viewport and you are scrolled up into the history, a rail appears in the right margin: the brighter thumb marks the part of the content on screen, and dragging the rail (or clicking anywhere on it) moves the window there. At the tail the rail is off, so the reading column stays clean by default. The rail lives in the margin the wrap already leaves free, so it never re-wraps a block, a transcript that fits its viewport draws none, and `scrollbar: false` keeps the margin bare at any scroll position.

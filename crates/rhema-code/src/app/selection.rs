@@ -28,6 +28,18 @@ pub(crate) struct TranscriptView {
     pub(crate) rows: Vec<String>,
     /// The scroll rail, when the rows ran past the viewport.
     pub(crate) rail: Option<ScrollRail>,
+    /// The markdown links on the drawn rows: the cells a click opens.
+    pub(crate) links: Vec<LinkHit>,
+}
+
+/// A markdown link as the last frame drew it: the cells its label
+/// covers and the URL they stand for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkHit {
+    /// The label's screen cells, one row high.
+    pub(crate) area: Rect,
+    /// The link's target.
+    pub(crate) url: String,
 }
 
 /// The transcript's scroll rail as the last frame drew it: the track's
@@ -86,6 +98,15 @@ impl ScrollRail {
 }
 
 impl TranscriptView {
+    /// The URL drawn under a screen cell, when the last frame put a
+    /// link label there.
+    pub(crate) fn link_at(&self, x: u16, y: u16) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|link| link.area.contains(ratatui::layout::Position::new(x, y)))
+            .map(|link| link.url.as_str())
+    }
+
     /// Whether the cell can start a selection: inside the rect and over
     /// a row that carries text (a short transcript leaves blank rows
     /// below it that select nothing).
@@ -297,6 +318,7 @@ mod tests {
             top: 0,
             rows: rows.iter().map(|row| (*row).to_owned()).collect(),
             rail: None,
+            links: Vec::new(),
         }
     }
 

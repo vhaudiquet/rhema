@@ -171,8 +171,20 @@ impl App {
             self.rail_drag = false;
             return true;
         }
-        if self.selection.is_none() {
+        let Some(selection) = self.selection else {
             return false;
+        };
+        // A press and release on one cell is a click, not a drag. Over a
+        // link label it opens the URL, the way a browser does; a drag
+        // still selects the text, the label included.
+        if selection.anchor == selection.cursor
+            && let Some(url) = self.transcript_view.link_at(x, y).map(str::to_owned)
+        {
+            self.selection = None;
+            if !(self.url_opener)(&url) {
+                self.push_notice("could not open the link: no browser launcher found");
+            }
+            return true;
         }
         self.on_mouse_drag(x, y);
         self.copy_selection();
@@ -622,7 +634,7 @@ impl App {
         let Some(url) = self.active_flow_url() else {
             return;
         };
-        let opened = crate::open_url::browser(&url);
+        let opened = (self.url_opener)(&url);
         self.note_active_flow(if opened {
             "opening the browser"
         } else {
