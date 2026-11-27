@@ -354,6 +354,16 @@ impl Transcript {
     }
 }
 
+/// A text as one display row: every control character becomes a space.
+/// A terminal drops control glyphs when it draws, so a newline left in
+/// a span joins the words around it; the spaces keep the width math
+/// honest and the words apart.
+pub(crate) fn one_row(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// A human description of a tool call for its transcript line: the built-in
 /// tools map to intent plus the argument that matters; unknown tools fall
 /// back to their name. Called at render time, so a streaming call's
@@ -364,14 +374,9 @@ pub fn describe(name: &str, args: &str) -> String {
     match name {
         // The shell command renders bare and in full: the transcript
         // cuts it at the terminal's width, not at an arbitrary count.
-        // Still one row: control characters, a heredoc's newlines,
-        // become spaces, because ratatui drops control glyphs when it
-        // draws, and the row's width math must count what shows.
+        // [`one_row`] keeps a heredoc's newlines from joining words.
         "bash" | "run_command" => match arg("command") {
-            Some(command) => command
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect(),
+            Some(command) => one_row(command),
             None => "(no command)".to_owned(),
         },
         // A subagent call reads as delegation: who was asked, then the

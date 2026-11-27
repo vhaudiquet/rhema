@@ -4027,6 +4027,30 @@ fn a_notification_renders_as_a_left_aligned_card() {
     assert!(narrow.len() > 2, "the body wrapped: {}", narrow.len());
 }
 
+/// A notification carries a whole shell script: the card flattens its
+/// line breaks to spaces, so the words stay apart and the frame holds.
+#[test]
+fn a_multiline_notification_renders_on_one_row() {
+    let text = "Background job abc (\"set -e\ncargo build\") has finished (exit 0).";
+    let (rows, _) = pane::render_notification(text, &DARK, 200);
+    let flat: String = rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(flat.contains("set -e cargo build"), "{flat}");
+    assert!(
+        !flat.contains("set -ecargo"),
+        "the words stay apart: {flat}"
+    );
+    assert_eq!(rows.len(), 3, "cap, one body row, foot: {flat}");
+}
+
 /// A run of finishes coalesces into one block, one stacked card per
 /// finish, the tick's joined prompt tells the model once, the
 /// transcript shows the same count.

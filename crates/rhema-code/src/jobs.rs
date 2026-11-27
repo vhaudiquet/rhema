@@ -229,6 +229,9 @@ impl Feed {
 /// vocabulary and the finish notice's text, in the registry's shape:
 /// what ended, and how.
 pub(crate) fn announcement(id: &str, command: &str, exit_code: Option<i32>) -> String {
+    // One line: the command is a whole script when the model asked for
+    // one, and this is a single notice to both readers.
+    let command = crate::transcript::one_row(command);
     match exit_code {
         Some(0) => format!("Background job {id} (\"{command}\") has finished (exit 0)."),
         Some(code) => {
@@ -1428,6 +1431,14 @@ mod tests {
         assert_eq!(
             announcement("abc", "npm run dev", None),
             "Background job abc (\"npm run dev\") was stopped."
+        );
+    }
+
+    #[test]
+    fn a_multiline_command_announces_on_one_line() {
+        assert_eq!(
+            announcement("abc", "set -e\ncargo build\necho done", Some(0)),
+            "Background job abc (\"set -e cargo build echo done\") has finished (exit 0)."
         );
     }
 

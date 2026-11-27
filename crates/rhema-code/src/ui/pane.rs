@@ -723,10 +723,11 @@ pub(crate) fn render_notification(
     theme: &Theme,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<BubbleGeom>) {
-    let body = vec![vec![Span::styled(
-        text.to_owned(),
-        Style::default().fg(theme.text),
-    )]];
+    // A card body is rows, never line breaks: a feed's text can carry a
+    // heredoc or a wrapped error report, and a control glyph left in a
+    // span would join its words when the terminal draws.
+    let text = crate::transcript::one_row(text);
+    let body = vec![vec![Span::styled(text, Style::default().fg(theme.text))]];
     let (rows, geometry) = bubble_card(body, width, false, theme, CardFill::Notice);
     (rows, geometry.into_iter().collect())
 }
