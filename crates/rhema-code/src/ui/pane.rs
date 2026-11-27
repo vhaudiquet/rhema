@@ -493,6 +493,25 @@ pub(crate) fn render_transcript(
                 .collect()
         })
         .collect();
+    // The bubbles the window shows, in viewport rows: a selection
+    // reads their messages and skips their frames. A card scrolled
+    // partly above the window keeps its true cap row, negative here, so
+    // only the rows still drawn count as frame.
+    let visible_bubbles: Vec<crate::app::selection::BubbleHit> = bubbles
+        .iter()
+        .filter_map(|(first_row, geometry)| {
+            let row = *first_row as isize - top as isize;
+            if row + geometry.rows as isize <= 0 || row >= visible as isize {
+                return None;
+            }
+            Some(crate::app::selection::BubbleHit {
+                row,
+                rows: geometry.rows,
+                left: geometry.left,
+                width: geometry.width,
+            })
+        })
+        .collect();
     frame.render_widget(
         Paragraph::new(window).style(Style::default().bg(theme.sunken).fg(theme.text)),
         inner,
@@ -503,6 +522,7 @@ pub(crate) fn render_transcript(
         rows: visible_rows,
         rail: None,
         links,
+        bubbles: visible_bubbles,
     };
     if let Some(selection) = app.selection {
         crate::app::selection::highlight(frame, &app.transcript_view, selection);

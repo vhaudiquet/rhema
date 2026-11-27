@@ -1972,6 +1972,80 @@ mod scroll_tests {
         );
     }
 
+    /// A drag across a prompt bubble copies its words and not the box:
+    /// the cap, the foot, and the border cells are chrome, and the
+    /// highlight leaves them plain.
+    #[test]
+    fn a_selection_over_a_prompt_bubble_skips_its_frame() {
+        use crate::app::selection::{self, Selection};
+        use ratatui::style::Modifier;
+
+        let mut app = chat_app();
+        app.transcript.push_user("hello there", Vec::new());
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+
+        assert!(
+            !app.transcript_view.bubbles.is_empty(),
+            "the drawn frame records its geometry"
+        );
+        let area = app.transcript_view.area;
+        let cap = app
+            .transcript_view
+            .rows
+            .iter()
+            .position(|row| row.contains('╭'))
+            .expect("the bubble cap is drawn");
+        let foot = app
+            .transcript_view
+            .rows
+            .iter()
+            .position(|row| row.contains('╰'))
+            .expect("the bubble foot is drawn");
+        let body = cap + 1;
+        assert!(app.transcript_view.rows[body].contains("hello there"));
+
+        let mut selection = Selection::new((area.x, area.y + cap as u16), app.transcript_view.top);
+        selection.extend((area.right() - 1, area.y + foot as u16));
+        assert_eq!(
+            selection::text(&app.transcript_view, selection),
+            "hello there",
+            "the copy is the message, not the box"
+        );
+
+        app.selection = Some(selection);
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        // No cell of the cap or the foot carries the highlight.
+        for x in area.x..area.right() {
+            assert!(
+                !reversed(x, area.y + cap as u16),
+                "cap cell {x} stays plain"
+            );
+            assert!(
+                !reversed(x, area.y + foot as u16),
+                "foot cell {x} stays plain"
+            );
+        }
+        // The border cells of the body stay plain; the words between
+        // them carry the highlight.
+        let body_y = area.y + body as u16;
+        let row = &app.transcript_view.rows[body];
+        let border = row.chars().position(|ch| ch == '│').unwrap() as u16;
+        assert!(
+            !reversed(area.x + border, body_y),
+            "the left border stays plain"
+        );
+        let byte = row.find("hello").unwrap();
+        let word = unicode_width::UnicodeWidthStr::width(&row[..byte]) as u16;
+        assert!(
+            reversed(area.x + word, body_y),
+            "the message is highlighted"
+        );
+    }
+
     #[test]
     fn elapsed_time_reads_as_a_clock() {
         assert_eq!(elapsed_text(std::time::Duration::from_secs(42)), "42s");

@@ -2734,6 +2734,7 @@ fn a_mouse_down_over_the_transcript_starts_a_selection() {
         rows: vec!["hello".to_owned()],
         rail: None,
         links: Vec::new(),
+        bubbles: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     assert_eq!(
@@ -2757,6 +2758,7 @@ fn a_mouse_down_outside_the_drawn_rows_clears_the_selection() {
         rows: vec!["hello".to_owned()],
         rail: None,
         links: Vec::new(),
+        bubbles: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     h.app.on_mouse_down(2, 3);
@@ -2787,6 +2789,7 @@ fn a_click_on_a_link_opens_it_and_a_drag_selects() {
             area: ratatui::layout::Rect::new(0, 0, 8, 1),
             url: "https://example.com/x".to_owned(),
         }],
+        bubbles: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     assert!(h.app.finish_selection(2, 0));
@@ -2835,6 +2838,7 @@ fn selected_hello(h: &mut Harness) {
         rows: vec!["hello".to_owned()],
         rail: None,
         links: Vec::new(),
+        bubbles: Vec::new(),
     };
     h.app.on_mouse_down(0, 0);
     h.app.on_mouse_drag(3, 0);
@@ -2928,6 +2932,7 @@ fn a_key_clears_the_selection() {
         rows: vec!["hello".to_owned()],
         rail: None,
         links: Vec::new(),
+        bubbles: Vec::new(),
     };
     h.app.on_mouse_down(2, 0);
     h.app.on_key(key(KeyCode::Char('x')));

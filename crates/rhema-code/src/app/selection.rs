@@ -30,6 +30,8 @@ pub(crate) struct TranscriptView {
     pub(crate) rail: Option<ScrollRail>,
     /// The markdown links on the drawn rows: the cells a click opens.
     pub(crate) links: Vec<LinkHit>,
+    /// The bubbles on the drawn rows, whose frames a selection skips.
+    pub(crate) bubbles: Vec<BubbleHit>,
 }
 
 /// A markdown link as the last frame drew it: the cells its label
@@ -40,6 +42,42 @@ pub(crate) struct LinkHit {
     pub(crate) area: Rect,
     /// The link's target.
     pub(crate) url: String,
+}
+
+/// A bubble's frame on the drawn rows: the cap row, the card's height,
+/// and the columns its corners span. A selection reads the message
+/// inside and never the frame itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BubbleHit {
+    /// The cap row, counted from the viewport's first drawn row. It is
+    /// negative when the card scrolled partly above the window.
+    pub(crate) row: isize,
+    /// The card's row count: cap, body, foot.
+    pub(crate) rows: usize,
+    /// The left corner's display column.
+    pub(crate) left: usize,
+    /// The card's width in cells, corner to corner.
+    pub(crate) width: usize,
+}
+
+impl BubbleHit {
+    /// Whether the card covers a drawn row.
+    fn covers(&self, row: usize) -> bool {
+        let row = row as isize;
+        row >= self.row && row < self.row + self.rows as isize
+    }
+
+    /// Whether a drawn row is the card's cap or foot.
+    fn is_edge(&self, row: usize) -> bool {
+        let row = row as isize;
+        row == self.row || row == self.row + self.rows as isize - 1
+    }
+
+    /// The card's content columns on a body row: inside the border and
+    /// the pad cell on each side.
+    fn content(&self) -> (usize, usize) {
+        (self.left + 2, self.left + self.width.saturating_sub(2))
+    }
 }
 
 /// The transcript's scroll rail as the last frame drew it: the track's
@@ -130,6 +168,24 @@ impl TranscriptView {
     fn row_width(&self, row: usize) -> usize {
         self.rows.get(row).map(|text| text.width()).unwrap_or(0)
     }
+
+    /// The display columns a selection may cover on one drawn row. A
+    /// plain row gives the columns it was asked for; a bubble body row
+    /// gives only its message, clamped inside the frame and its pad
+    /// cells; a card's cap or foot gives none.
+    fn selectable(&self, row: usize, from: usize, to: usize) -> Option<(usize, usize)> {
+        let Some(bubble) = self.bubbles.iter().rev().find(|bubble| bubble.covers(row)) else {
+            return Some((from, to));
+        };
+        if bubble.is_edge(row) {
+            return None;
+        }
+        let (inner_from, inner_to) = bubble.content();
+        if to <= inner_from || from >= inner_to {
+            return None;
+        }
+        Some((from.max(inner_from), to.min(inner_to)))
+    }
 }
 
 /// A selection's two endpoints, in absolute screen cells: the cell the
@@ -168,9 +224,11 @@ impl Selection {
 /// The plain text between the selection's endpoints. A row slice runs
 /// from the start column to the row's end, every middle row is whole,
 /// and the last row stops at the end column; the end cell is excluded,
-/// so a drag to a line's end takes every character. Trailing whitespace
-/// on each row is trimmed, and the blank rows below the last line of a
-/// downward drag are dropped.
+/// so a drag to a line's end takes every character. A bubble contributes
+/// only its message: its frame, the cap and foot rows, and the pad cells
+/// around the text are not selected. Trailing whitespace on each row is
+/// trimmed, and the blank rows below the last line of a downward drag
+/// are dropped.
 pub(crate) fn text(view: &TranscriptView, selection: Selection) -> String {
     if view.rows.is_empty() {
         return String::new();
@@ -196,16 +254,19 @@ pub(crate) fn text(view: &TranscriptView, selection: Selection) -> String {
     let mut rows = Vec::new();
     for row in start_row..=end_row {
         let line = &view.rows[row];
-        let from = if row == start_row {
-            char_start(line, start_col)
-        } else {
-            0
-        };
+        let from = if row == start_row { start_col } else { 0 };
         let to = if row == end_row && !end_spills {
-            char_end(line, end_col)
+            end_col
         } else {
-            line.chars().count()
+            view.row_width(row)
         };
+        // A bubble row outside the card's interior contributes nothing:
+        // the frame and its pads never reach the clipboard.
+        let Some((from, to)) = view.selectable(row, from, to) else {
+            continue;
+        };
+        let from = char_start(line, from);
+        let to = char_end(line, to);
         let piece: String = line
             .chars()
             .skip(from)
@@ -220,8 +281,8 @@ pub(crate) fn text(view: &TranscriptView, selection: Selection) -> String {
 }
 
 /// Marks the selected cells reversed, the terminal's own selection look.
-/// Only the text the rows carry is covered; the empty tail of a row and
-/// the two-cell right margin stay plain.
+/// Only the text the rows carry is covered; the empty tail of a row, the
+/// two-cell right margin, and a bubble's frame stay plain.
 pub(crate) fn highlight(
     frame: &mut ratatui::Frame<'_>,
     view: &TranscriptView,
@@ -258,8 +319,11 @@ pub(crate) fn highlight(
             display_width(line, char_end(line, end_col))
         } else {
             row_width
-        }
-        .min(area.width as usize);
+        };
+        let Some((from, to)) = view.selectable(row, from, to) else {
+            continue;
+        };
+        let to = to.min(area.width as usize);
         if from >= to {
             continue;
         }
@@ -313,12 +377,17 @@ mod tests {
     use super::*;
 
     fn view(rows: &[&str]) -> TranscriptView {
+        view_with_bubbles(rows, Vec::new())
+    }
+
+    fn view_with_bubbles(rows: &[&str], bubbles: Vec<BubbleHit>) -> TranscriptView {
         TranscriptView {
             area: Rect::new(0, 0, 40, rows.len() as u16),
             top: 0,
             rows: rows.iter().map(|row| (*row).to_owned()).collect(),
             rail: None,
             links: Vec::new(),
+            bubbles,
         }
     }
 
@@ -391,6 +460,96 @@ mod tests {
         let view = view(&["one", "two"]);
         let selection = Selection::new((0, 9), 0);
         assert_eq!(text(&view, selection), "");
+    }
+
+    #[test]
+    fn a_selection_over_a_bubble_copies_its_words_and_not_its_frame() {
+        let view = view_with_bubbles(
+            &["╭────╮", "│ hi │", "╰────╯"],
+            vec![BubbleHit {
+                row: 0,
+                rows: 3,
+                left: 0,
+                width: 6,
+            }],
+        );
+        let mut selection = Selection::new((0, 0), 0);
+        selection.extend((6, 2));
+        assert_eq!(text(&view, selection), "hi");
+    }
+
+    #[test]
+    fn a_bubble_keeps_the_space_beside_it_out_of_the_copy() {
+        let view = view_with_bubbles(
+            &["      ╭────╮", "      │ hi │", "      ╰────╯"],
+            vec![BubbleHit {
+                row: 0,
+                rows: 3,
+                left: 6,
+                width: 6,
+            }],
+        );
+        // The drag starts in the empty margin and runs past the card.
+        let mut selection = Selection::new((0, 1), 0);
+        selection.extend((12, 1));
+        assert_eq!(text(&view, selection), "hi");
+        // Starting on the cap and ending on the body drops the cap row
+        // instead of leading the copy with a blank line.
+        let mut selection = Selection::new((0, 0), 0);
+        selection.extend((12, 1));
+        assert_eq!(text(&view, selection), "hi");
+    }
+
+    #[test]
+    fn a_selection_inside_a_bubble_body_reads_only_its_cells() {
+        let view = view_with_bubbles(
+            &["╭──────╮", "│ hello │", "╰──────╯"],
+            vec![BubbleHit {
+                row: 0,
+                rows: 3,
+                left: 0,
+                width: 8,
+            }],
+        );
+        // Columns 2 through 7 are the content cells; the end is
+        // excluded, so this keeps `hell`.
+        let mut selection = Selection::new((2, 1), 0);
+        selection.extend((7, 1));
+        assert_eq!(text(&view, selection), "hell");
+    }
+
+    #[test]
+    fn a_multiline_bubble_drops_both_frame_rows_and_keeps_its_lines() {
+        let view = view_with_bubbles(
+            &["╭─────╮", "│ one │", "│ two │", "╰─────╯"],
+            vec![BubbleHit {
+                row: 0,
+                rows: 4,
+                left: 0,
+                width: 7,
+            }],
+        );
+        let mut selection = Selection::new((0, 0), 0);
+        selection.extend((7, 3));
+        assert_eq!(text(&view, selection), "one\ntwo");
+    }
+
+    #[test]
+    fn a_bubble_scrolled_above_the_window_keeps_its_visible_body() {
+        // The cap is off-screen at row -1; the body row drawn at row 0
+        // still reads as content, not as a frame.
+        let view = view_with_bubbles(
+            &["│ hi │"],
+            vec![BubbleHit {
+                row: -1,
+                rows: 3,
+                left: 0,
+                width: 6,
+            }],
+        );
+        let mut selection = Selection::new((0, 0), 0);
+        selection.extend((6, 0));
+        assert_eq!(text(&view, selection), "hi");
     }
 
     #[test]
