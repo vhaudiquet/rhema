@@ -15,23 +15,24 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 # The encrypted file store (see src/secrets.rs): the age format, a
-# pure-Rust X25519 + ChaCha20-Poly1305 implementation. The 0.12.1
-# release still pins ml-kem 0.2, whose `kem` requirement collides with
-# the 0.3 that russh needs (see crates/rhema-sandbox-ssh). Main has
-# moved to the new RustCrypto stack (ml-kem 0.3) with the same X25519
-# API; pin a rev until a release carries it.
-age = { git = "https://github.com/str4d/rage", rev = "eaa85530ba78734924ccf41b16dd55daa29b7cfd" }
+# pure-Rust X25519 + ChaCha20-Poly1305 implementation. 0.11 is the
+# last line without the post-quantum branch: 0.12's hpke pulls
+# ml-kem 0.2, whose `kem` requirement collides with the 0.3 that
+# russh needs (see crates/rhema-sandbox-ssh), and a git pin cannot be
+# published. The X25519 API and the v1 file format are the same in
+# both lines, so move back when a release carries ml-kem 0.3.
+age = "0.11"
 # The old OS keyring, read-only: the one-way importer opens it to copy
 # `secret_ref`s the file store is missing. Nothing writes or deletes
 # there, and an SSH session skips it (see src/secrets.rs).
 keyring = { version = "4", default-features = false, features = ["v1"] }
 
-# age's rand pulls getrandom, whose wasm32-unknown-unknown backend is
-# opt-in and would otherwise fail the cloud frontend's wasm check. The
-# feature is enabled on that target only, through the crate that brings
-# getrandom into the graph.
+# age 0.11's rand pulls getrandom 0.2, whose wasm32-unknown-unknown
+# backend is opt-in and would otherwise fail the cloud frontend's wasm
+# check. The feature is enabled on that target only, through the crate
+# that brings getrandom into the graph.
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 tempfile = "3"
