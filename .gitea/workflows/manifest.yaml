@@ -1,0 +1,44 @@
+# Re-publish the channel manifest for a version that is already in the
+# prefix. The release run cannot get here when a build leg failed, or
+# when a platform was published by hand (the Mac's
+# scripts/publish-binary.sh keeps the stable pointer where it was), so
+# this entry runs the same script on the default branch and takes the
+# version as an input.
+name: manifest
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Channel version to repoint at (for example 0.5.0)"
+        required: true
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
+
+      - name: Publish the channel manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${{ inputs.version }}"
+          bash .gitea/scripts/publish-manifest.sh "$version"

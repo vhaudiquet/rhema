@@ -174,6 +174,15 @@ jobs:
           repo="vhaudiquet/rhema"
           asset="rhema-darwin-arm64.tar.gz"
           endpoint="https://s3.rhema.rs"
+          # The prefix is the set: a tarball published outside this job
+          # (a Mac running the rhema.rs repo's publish-binary.sh) stands
+          # already, and the mirror may never make a release for the tag
+          # (an immutable release retires its tag name for good). One
+          # HEAD answers whether the import is still needed.
+          if curl -fsI "https://get.rhema.rs/$version/$asset" >/dev/null 2>&1; then
+            echo "$asset already stands under $version; nothing to import"
+            exit 0
+          fi
           # The mirror's macos workflow mints the release when the
           # tag reaches it; the asset stands when its build does. The
           # timeout covers a cold rust toolchain on the runner.
@@ -217,6 +226,8 @@ jobs:
     needs: [release-binaries, darwin-to-s3]
     runs-on: ubuntu-latest
     steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
       - name: Install the AWS CLI
         # Ubuntu 24.04 dropped the awscli package; the official v2
         # bundle is the source of truth. Skipped where the runner
@@ -241,39 +252,7 @@ jobs:
           AWS_EC2_METADATA_DISABLED: "true"
         run: |
           version="${GITHUB_REF_NAME#v}"
-          endpoint="https://s3.rhema.rs"
-          mkdir -p dist
-          # Whatever the legs uploaded, plus any platform built outside
-          # this matrix (a Mac laptop running the rhema.rs repo's
-          # scripts/publish-binary.sh): the prefix is the set, not this
-          # file.
-          names=$(aws s3 ls "s3://get/$version/" --endpoint-url "$endpoint" |
-            awk '{print $4}' | sed -n 's/^rhema-\(.*\)\.tar\.gz$/\1/p' | sort)
-          for required in linux-amd64 linux-arm64 linux-riscv64 darwin-arm64; do
-            echo "$names" | grep -qx "$required" ||
-              { echo "no rhema-$required.tar.gz under $version" >&2; exit 1; }
-          done
-          for name in $names; do
-            curl -fsSL "https://get.rhema.rs/$version/rhema-$name.tar.gz" \
-              -o "dist/rhema-$name.tar.gz"
-          done
-          (cd dist && sha256sum rhema-*.tar.gz > checksums.txt)
-          # One binary per line, on the same line as its name: the
-          # installer parses the manifest with line-wise sed, so
-          # reformatting this through json.dumps breaks every install.
-          {
-            printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
-            first=1
-            for name in $names; do
-              if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
-              sha="$(sha256sum "dist/rhema-$name.tar.gz" | awk '{print $1}')"
-              printf '    "rhema-%s": {"url": "https://get.rhema.rs/%s/rhema-%s.tar.gz", "sha256": "%s"}' \
-                "$name" "$version" "$name" "$sha"
-            done
-            printf '\n  }\n}\n'
-          } > dist/manifest.json
-          aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
-          aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
+          bash .gitea/scripts/publish-manifest.sh "$version"
 
   mirror-to-github:
     # The public mirror serves what the channel serves: every
