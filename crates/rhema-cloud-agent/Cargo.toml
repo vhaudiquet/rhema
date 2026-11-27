@@ -19,16 +19,16 @@ mock = ["rhema-sandbox/mock"]
 # The tools and the driver run on the seams, not on a filesystem: the
 # shell comes in without its local executor, which this crate's sandbox
 # executor replaces.
-rhema-bash = { path = "../rhema-bash", version = "0.5.0", default-features = false }
-rhema-prompt = { path = "../rhema-prompt", version = "0.5.0" }
-rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.0", default-features = false }
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
+rhema-bash = { path = "../rhema-bash", version = "0.5.1", default-features = false }
+rhema-prompt = { path = "../rhema-prompt", version = "0.5.1" }
+rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.1", default-features = false }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
 # The sandbox seam, extracted so any frontend can reach it; the mock
 # default stays off here, this crate drives no scripted sandbox, its
 # e2e test does (see dev-dependencies).
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.0", default-features = false }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.1", default-features = false }
 # Transcript settings in the session config
-rhema-transcript = { path = "../rhema-transcript", version = "0.5.0" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.5.1" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

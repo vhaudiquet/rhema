@@ -11,12 +11,12 @@ authors.workspace = true
 [dependencies]
 # The Profile the chain assembles from and the SecretStore its keys
 # resolve through
-rhema-config = { path = "../rhema-config", version = "0.5.0" }
-rhema-websearch = { path = "../rhema-websearch", version = "0.5.0", default-features = false }
-rhema-websearch-brave = { path = "../rhema-websearch-brave", version = "0.5.0" }
-rhema-websearch-exa = { path = "../rhema-websearch-exa", version = "0.5.0" }
-rhema-websearch-tavily = { path = "../rhema-websearch-tavily", version = "0.5.0" }
-rhema-websearch-opencode = { path = "../rhema-websearch-opencode", version = "0.5.0" }
+rhema-config = { path = "../rhema-config", version = "0.5.1" }
+rhema-websearch = { path = "../rhema-websearch", version = "0.5.1", default-features = false }
+rhema-websearch-brave = { path = "../rhema-websearch-brave", version = "0.5.1" }
+rhema-websearch-exa = { path = "../rhema-websearch-exa", version = "0.5.1" }
+rhema-websearch-tavily = { path = "../rhema-websearch-tavily", version = "0.5.1" }
+rhema-websearch-opencode = { path = "../rhema-websearch-opencode", version = "0.5.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -21,18 +21,18 @@ mock = ["rhema-core/mock"]
 # macros that ride it, and the system prompt with its skills list.
 # Default features off; the `local-shell` feature (default on) brings
 # the process shell back, and a wasm build turns it off.
-rhema-bash = { path = "../rhema-bash", version = "0.5.0", default-features = false }
-rhema-prompt = { path = "../rhema-prompt", version = "0.5.0" }
-rhema-skills = { path = "../rhema-skills", version = "0.5.0" }
-rhema-config = { path = "../rhema-config", version = "0.5.0" }
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
+rhema-bash = { path = "../rhema-bash", version = "0.5.1", default-features = false }
+rhema-prompt = { path = "../rhema-prompt", version = "0.5.1" }
+rhema-skills = { path = "../rhema-skills", version = "0.5.1" }
+rhema-config = { path = "../rhema-config", version = "0.5.1" }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
 # The bounded view over an unbounded session, when the config enables it
-rhema-transcript = { path = "../rhema-transcript", version = "0.5.0" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.5.1" }
 # `save_session_to`/`load_session_from`: the seam's error type and the
 # one atomic, fsynced session-file writer, shared with the frontends'
 # stores
-rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.1" }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.1" }
 # The SYSTEM.md template engine: the renderer lives in the toolkit,
 # the template error type stays with the driver
 minijinja = { workspace = true }

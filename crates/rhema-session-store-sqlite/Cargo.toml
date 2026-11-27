@@ -10,9 +10,9 @@ authors.workspace = true
 
 [dependencies]
 # The trait, ids, metadata, errors, and the opening-prompt helper
-rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.1" }
 # The saved value
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
 # Bundled: no system sqlite, and the same version rhema-rsd locks, so
 # the workspace builds one copy.
 rusqlite = { version = "0.43", features = ["bundled"] }
@@ -21,10 +21,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 # The replayable contract suite
-rhema-session-store = { path = "../rhema-session-store", version = "0.5.0", features = ["store-contract"] }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.1", features = ["store-contract"] }
 # The cross-backend equality test: a file store's Session and a SQLite
 # Session round-trip equal.
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.1" }
 tempfile = "3"
 
 [lints]

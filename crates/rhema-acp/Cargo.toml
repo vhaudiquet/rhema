@@ -13,20 +13,20 @@ authors.workspace = true
 mock = ["rhema-core/mock", "rhema-host-agent/mock"]
 
 [dependencies]
-rhema-config = { path = "../rhema-config", version = "0.5.0" }
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
-rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.0" }
+rhema-config = { path = "../rhema-config", version = "0.5.1" }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
+rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.1" }
 # The turn submission a prompt records, and the reconcile a load runs
-rhema-submissions = { path = "../rhema-submissions", version = "0.5.0" }
+rhema-submissions = { path = "../rhema-submissions", version = "0.5.1" }
 # Session persistence: the seam's types and the shared file backend
-rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.1" }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.1" }
 # The vision wiring's env map, for the agent config's shell_env
-rhema-bash = { path = "../rhema-bash", version = "0.5.0" }
+rhema-bash = { path = "../rhema-bash", version = "0.5.1" }
 # The adapter family, resolved from config the same way the other
 # frontends resolve it
-rhema-provider = { path = "../rhema-provider", version = "0.5.0" }
-rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.5.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.5.1" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.5.1" }
 # The ACP schema and agent-side connection; `stdio` is the transport a
 # subprocess agent serves on
 agent-client-protocol = { workspace = true, features = ["stdio"] }

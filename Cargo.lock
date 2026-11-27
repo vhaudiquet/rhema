@@ -4297,7 +4297,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-acp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-bash"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4333,7 +4333,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-cloud-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "rhema-bash",
@@ -4350,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-code"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4408,7 +4408,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "age",
  "getrandom 0.2.17",
@@ -4423,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "hegeltest",
@@ -4435,7 +4435,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -4446,7 +4446,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision-clef"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4459,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision-jev"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4472,7 +4472,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision-opencode"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4484,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision-openrouter"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-decision-registry"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-config",
  "rhema-decision",
@@ -4512,7 +4512,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-host-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "datealgo",
  "minijinja",
@@ -4534,7 +4534,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-identity"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "datealgo",
  "rusqlite",
@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-memory"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "datealgo",
@@ -4561,7 +4561,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-model-catalog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4574,7 +4574,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-prompt"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "minijinja",
  "rhema-core",
@@ -4584,7 +4584,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -4599,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-anthropic"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-chatgpt"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4634,7 +4634,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-copilot"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4652,7 +4652,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-google"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4669,7 +4669,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-llama-cpp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4686,7 +4686,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-mistral"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4704,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-openai-compatible"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4721,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-opencode"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4736,7 +4736,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-openrouter"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-registry"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-core",
  "rhema-model-catalog",
@@ -4774,7 +4774,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-rsd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "rhema-core",
@@ -4787,7 +4787,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "rhema-bash",
@@ -4803,7 +4803,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-docker"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4814,7 +4814,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-ecrou"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-http"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-local"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-lxd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4860,7 +4860,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-ssh"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-session-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-core",
  "serde",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-session-store-file"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-config",
  "rhema-core",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-session-store-sqlite"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-core",
  "rhema-session-store",
@@ -4907,7 +4907,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-skills"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-core",
  "serde",
@@ -4917,7 +4917,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-subagents"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "rhema-bash",
@@ -4940,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-submissions"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-core",
  "rhema-session-store",
@@ -4954,7 +4954,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-transcript"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "hegeltest",
@@ -4966,7 +4966,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "hegeltest",
@@ -4976,7 +4976,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch-brave"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch-exa"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch-opencode"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch-registry"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rhema-config",
  "rhema-websearch",
@@ -5029,7 +5029,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-websearch-tavily"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest",

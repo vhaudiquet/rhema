@@ -18,7 +18,7 @@ native = ["dep:reqwest"]
 
 [dependencies]
 # The seam this crate implements and the vocabulary it speaks
-rhema-websearch = { path = "../rhema-websearch", version = "0.5.0", default-features = false }
+rhema-websearch = { path = "../rhema-websearch", version = "0.5.1", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # dyn WebSearchProvider

@@ -23,11 +23,11 @@ spawn = ["dep:tokio", "tokio/process", "tokio/io-util", "tokio/time", "tokio/fs"
 [dependencies]
 # The seam adapts onto the bash tool's exec-only shell; it arrives
 # without the local shell, which every backend of this family replaces.
-rhema-bash = { path = "../rhema-bash", version = "0.5.0", default-features = false }
+rhema-bash = { path = "../rhema-bash", version = "0.5.1", default-features = false }
 # The seed paths are the workspace conventions: core spells the
 # `.rhema` root, rhema-skills the skills tiers.
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
-rhema-skills = { path = "../rhema-skills", version = "0.5.0" }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
+rhema-skills = { path = "../rhema-skills", version = "0.5.1" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 # The protocol tests pin the wire's JSON

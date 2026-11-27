@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # The seam and the process family's shared machinery (`spawn`): the
 # stream pump, the textual path guard, the shell quoting
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.0", features = ["spawn"] }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.1", features = ["spawn"] }
 # The built-in ssh client: the sandbox speaks the protocol in-process,
 # no `ssh` binary assumed on the machine that runs it. The RustCrypto
 # backend stays (default-features off drops aws-lc-rs, which builds C),

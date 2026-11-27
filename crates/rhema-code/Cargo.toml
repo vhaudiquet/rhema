@@ -28,46 +28,46 @@ mock = ["rhema-core/mock", "rhema-host-agent/mock"]
 vendored-openssl = ["dep:openssl"]
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.5.0" }
+rhema-core = { path = "../rhema-core", version = "0.5.1" }
 # The session store seam and its file backend: saved sessions, the
 # checkpoint write, the resume listing
-rhema-session-store = { path = "../rhema-session-store", version = "0.5.0" }
-rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.0" }
-rhema-config = { path = "../rhema-config", version = "0.5.0" }
-rhema-bash = { path = "../rhema-bash", version = "0.5.0" }
-rhema-prompt = { path = "../rhema-prompt", version = "0.5.0" }
-rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.0" }
+rhema-session-store = { path = "../rhema-session-store", version = "0.5.1" }
+rhema-session-store-file = { path = "../rhema-session-store-file", version = "0.5.1" }
+rhema-config = { path = "../rhema-config", version = "0.5.1" }
+rhema-bash = { path = "../rhema-bash", version = "0.5.1" }
+rhema-prompt = { path = "../rhema-prompt", version = "0.5.1" }
+rhema-host-agent = { path = "../rhema-host-agent", version = "0.5.1" }
 # Skill discovery: the tiers, the frontmatter, the shadowing
-rhema-skills = { path = "../rhema-skills", version = "0.5.0" }
+rhema-skills = { path = "../rhema-skills", version = "0.5.1" }
 # The subagent extension: discovered definitions wired in as one tool
-rhema-subagents = { path = "../rhema-subagents", version = "0.5.0" }
+rhema-subagents = { path = "../rhema-subagents", version = "0.5.1" }
 # The submission ledger a resumed session reconciles before any turn
-rhema-submissions = { path = "../rhema-submissions", version = "0.5.0" }
+rhema-submissions = { path = "../rhema-submissions", version = "0.5.1" }
 # The bounded request view, when --transcript is set
-rhema-transcript = { path = "../rhema-transcript", version = "0.5.0" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.5.1" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
-rhema-acp = { path = "../rhema-acp", version = "0.5.0" }
+rhema-acp = { path = "../rhema-acp", version = "0.5.1" }
 # Where bash runs: the sandbox seam and its backends, docker, lxd,
 # ecrou, ssh, http, behind the stored choice; the seam itself brings
 # `FsRoot` (feature `spawn`)
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.0", features = [
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.5.1", features = [
     "spawn",
 ] }
-rhema-sandbox-ecrou = { path = "../rhema-sandbox-ecrou", version = "0.5.0" }
-rhema-sandbox-lxd = { path = "../rhema-sandbox-lxd", version = "0.5.0" }
-rhema-sandbox-docker = { path = "../rhema-sandbox-docker", version = "0.5.0" }
-rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.5.0" }
-rhema-sandbox-ssh = { path = "../rhema-sandbox-ssh", version = "0.5.0" }
+rhema-sandbox-ecrou = { path = "../rhema-sandbox-ecrou", version = "0.5.1" }
+rhema-sandbox-lxd = { path = "../rhema-sandbox-lxd", version = "0.5.1" }
+rhema-sandbox-docker = { path = "../rhema-sandbox-docker", version = "0.5.1" }
+rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.5.1" }
+rhema-sandbox-ssh = { path = "../rhema-sandbox-ssh", version = "0.5.1" }
 # The shared model card every adapter's catalog normalizes into
-rhema-provider = { path = "../rhema-provider", version = "0.5.0" }
-rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.5.0" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.5.0" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.5.0" }
-rhema-provider-chatgpt = { path = "../rhema-provider-chatgpt", version = "0.5.0" }
-rhema-provider-mistral = { path = "../rhema-provider-mistral", version = "0.5.0" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.5.0" }
-rhema-provider-opencode = { path = "../rhema-provider-opencode", version = "0.5.0" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.5.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.5.1" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.5.1" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.5.1" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.5.1" }
+rhema-provider-chatgpt = { path = "../rhema-provider-chatgpt", version = "0.5.1" }
+rhema-provider-mistral = { path = "../rhema-provider-mistral", version = "0.5.1" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.5.1" }
+rhema-provider-opencode = { path = "../rhema-provider-opencode", version = "0.5.1" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.5.1" }
 # Derives for the saved session's usage-stats blob (src/sessions.rs);
 # the session types themselves live in rhema-core
 serde = { workspace = true }
@@ -109,14 +109,14 @@ base64 = "0.23"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 # The search macro's fleet: the seam, the three adapters through the
 # registry, and the profile assembly the __search mode runs
-rhema-websearch = { path = "../rhema-websearch", version = "0.5.0", default-features = false }
-rhema-websearch-registry = { path = "../rhema-websearch-registry", version = "0.5.0" }
+rhema-websearch = { path = "../rhema-websearch", version = "0.5.1", default-features = false }
+rhema-websearch-registry = { path = "../rhema-websearch-registry", version = "0.5.1" }
 # The decide macro's fleet: the seam and the profile-to-chain assembly
 # the __decision mode runs (the adapters ride behind the registry)
-rhema-decision = { path = "../rhema-decision", version = "0.5.0", default-features = false }
-rhema-decision-registry = { path = "../rhema-decision-registry", version = "0.5.0" }
+rhema-decision = { path = "../rhema-decision", version = "0.5.1", default-features = false }
+rhema-decision-registry = { path = "../rhema-decision-registry", version = "0.5.1" }
 # The add dialog prefills the Go endpoint its decision row stores
-rhema-decision-opencode = { path = "../rhema-decision-opencode", version = "0.5.0" }
+rhema-decision-opencode = { path = "../rhema-decision-opencode", version = "0.5.1" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 serde_yaml.workspace = true
 # The installer's published `<url>.sha256` is checked before it runs
@@ -128,9 +128,9 @@ rand = "0.10"
 
 [dev-dependencies]
 # The __search mode tests drive a scripted chain
-rhema-websearch = { path = "../rhema-websearch", version = "0.5.0", features = ["mock"] }
+rhema-websearch = { path = "../rhema-websearch", version = "0.5.1", features = ["mock"] }
 # The __decision mode tests drive a scripted chain
-rhema-decision = { path = "../rhema-decision", version = "0.5.0", features = ["mock"] }
+rhema-decision = { path = "../rhema-decision", version = "0.5.1", features = ["mock"] }
 # The sandbox tests drive the scripted sandbox
 rhema-sandbox = { path = "../rhema-sandbox", features = ["mock"] }
 tempfile = "3"
